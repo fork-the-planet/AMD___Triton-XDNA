@@ -26,7 +26,7 @@ Usage::
     with config_context(compile_only=True, target="npu2"):
         kernel[grid](a, b, c)
 
-    # Forward an optional value: pass dataclasses.MISSING to mean "don't override"
+    # Forward an optional value: pass MISSING to mean "don't override"
     from dataclasses import MISSING
     with config_context(transform_tiling_script=user_opts.get("script", MISSING)):
         kernel[grid](a, b, c)
@@ -247,9 +247,10 @@ def set_config(**kwargs):
 
         set_config(compile_only=True, bf16_emulation=True)
 
-    Values equal to ``dataclasses.MISSING`` are skipped, so callers can
-    forward optional overrides without branching::
+    Values that are ``dataclasses.MISSING`` (identity comparison) are
+    skipped, so callers can forward optional overrides without branching::
 
+        from dataclasses import MISSING
         set_config(target=user_opts.get("target", MISSING))
 
     Raises ``ValueError`` for unknown keys.
