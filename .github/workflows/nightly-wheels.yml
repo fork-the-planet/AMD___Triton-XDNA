@@ -219,9 +219,11 @@ jobs:
           Remove-Item -Recurse -Force $tempDir
 
       - name: Install cibuildwheel
+        # Use `python -m pip` instead of `pip` because Windows can't replace
+        # the running pip.exe wrapper while it holds the file open.
         run: |
-          pip install --upgrade pip
-          pip install cibuildwheel
+          python -m pip install --upgrade pip
+          python -m pip install cibuildwheel
 
       - name: Build wheels with cibuildwheel
         env:
