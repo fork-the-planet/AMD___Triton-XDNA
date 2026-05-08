@@ -147,10 +147,11 @@ pip install --upgrade pip setuptools wheel
 
 Prepare XRT development files (headers, import library, xclbinutil). Download
 `xrt_windows_sdk.zip` from [Xilinx/XRT releases](https://github.com/Xilinx/XRT/releases)
-and extract the `xrt/` directory to `C:\Program Files\AMD\xrt`:
+and extract the inner `xrt_sdk/xrt/` directory (note the zip's top-level
+folder is `xrt_sdk/`) to `C:\Program Files\AMD\xrt`:
 
 ```powershell
-# The xrt/ folder inside the zip should end up at:
+# The contents of xrt_sdk/xrt/ inside the zip should end up at:
 #   C:\Program Files\AMD\xrt\include\xrt\xrt_bo.h
 #   C:\Program Files\AMD\xrt\lib\xrt_coreutil.lib
 ```

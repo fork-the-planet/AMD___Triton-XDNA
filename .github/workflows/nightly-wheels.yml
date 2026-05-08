@@ -228,8 +228,19 @@ jobs:
         run: |
           Write-Host "Downloading $env:XRT_WINDOWS_SDK_URL"
           Invoke-WebRequest -Uri $env:XRT_WINDOWS_SDK_URL -OutFile xrt_windows_sdk.zip
+          # Zip layout is xrt_sdk/xrt/{include,lib,...}; extract to a temp
+          # location and move the inner xrt/ folder to where the build
+          # expects it (C:\Program Files\AMD\xrt).
+          $tempDir = Join-Path $env:RUNNER_TEMP "xrt_extract"
+          New-Item -ItemType Directory -Force -Path $tempDir | Out-Null
+          Expand-Archive -Path xrt_windows_sdk.zip -DestinationPath $tempDir -Force
+          $srcXrt = Join-Path $tempDir "xrt_sdk\xrt"
+          if (-not (Test-Path $srcXrt)) {
+            Write-Error "Unexpected SDK zip layout: $srcXrt not found"
+            exit 1
+          }
           New-Item -ItemType Directory -Force -Path "C:\Program Files\AMD" | Out-Null
-          Expand-Archive -Path xrt_windows_sdk.zip -DestinationPath "C:\Program Files\AMD\" -Force
+          Move-Item -Path $srcXrt -Destination "C:\Program Files\AMD\xrt" -Force
           $hdr = "C:\Program Files\AMD\xrt\include\xrt\xrt_bo.h"
           if (-not (Test-Path $hdr)) {
             Write-Error "XRT SDK extraction failed: $hdr not found"
@@ -237,6 +248,7 @@ jobs:
           }
           Write-Host "XRT SDK installed at C:\Program Files\AMD\xrt"
           Remove-Item xrt_windows_sdk.zip
+          Remove-Item -Recurse -Force $tempDir
 
       - name: Install cibuildwheel
         run: |
