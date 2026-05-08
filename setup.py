@@ -380,7 +380,14 @@ def download_llvm_for_triton_windows(triton_dir: Path) -> Path:
 
         print("  Extracting...")
         with tarfile.open(download_path, "r:gz") as tar:
-            tar.extractall(triton_dir.parent, filter="data")
+            # filter="data" requires Python 3.12+ (PEP 706) or a backport
+            # patch release (3.10.12+, 3.11.4+). cibuildwheel's bundled
+            # nuget-cpython for 3.10/3.11 isn't always a backported version,
+            # so guard the kwarg.
+            if sys.version_info >= (3, 12):
+                tar.extractall(triton_dir.parent, filter="data")
+            else:
+                tar.extractall(triton_dir.parent)
 
         if not llvm_dir.exists():
             raise RuntimeError(f"Extracted LLVM directory not found: {llvm_dir}")
