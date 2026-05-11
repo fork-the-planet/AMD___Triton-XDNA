@@ -1,3 +1,6 @@
+// Copyright (C) 2026, Advanced Micro Devices, Inc. All rights reserved.
+// SPDX-License-Identifier: MIT
+
 // Weighted RMS Norm transform for AIE2P, following mlir-air xrt 43_triton_layernorm/transform_aie2p.mlir.
 // Chain (after fuse_elementwise + transpose_reduce): generic_sq -> reduce -> output_generic (consumes W).
 // Hybrid: bufferize_to_allocation for fills/generics/reduce; linalg_promote for W only (post-bufferize).
@@ -103,8 +106,11 @@ module attributes {transform.with_named_sequence} {
     // PHASE 8.5: linalg_promote to add L1 staging for W (post-bufferize).
     // The output_generic now has memref operands ins(X_L1, reduced_L1, W_func_input).
     // Promote operand 2 (W) only - other operands are already L1.
-    %output_gen_buf = transform.structured.match ops{["linalg.generic"]} in %arg1 : (!transform.any_op) -> !transform.any_op
-    %sq_buf, %out_buf = transform.split_handle %output_gen_buf : (!transform.any_op) -> (!transform.any_op, !transform.any_op)
+    // Restrict match to the forall body so unrelated post-bufferize generics
+    // (e.g. memcpy-like) can't poison the split.
+    %forall_buf = transform.structured.match ops{["scf.forall"]} in %arg1 : (!transform.any_op) -> !transform.any_op
+    %generics_in_forall = transform.structured.match ops{["linalg.generic"]} in %forall_buf : (!transform.any_op) -> !transform.any_op
+    %sq_buf, %out_buf = transform.split_handle %generics_in_forall : (!transform.any_op) -> (!transform.any_op, !transform.any_op)
     %w_promoted = transform.air.linalg_promote %out_buf {memory_space = "L1", operands_to_promote = [2]} : (!transform.any_op) -> !transform.any_op
 
     // Canonicalize to fold any self-copies linalg_promote may have introduced.
