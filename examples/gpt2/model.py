@@ -31,6 +31,7 @@ from contextlib import contextmanager
 
 import torch
 import math
+import numpy as np
 
 from kernels import triton_linear, triton_bmm, triton_softmax, triton_layernorm, triton_gelu, triton_add, triton_fused_attention
 
@@ -106,6 +107,177 @@ HETERO_ROUTING = {
 }
 
 
+def _next_pow2(n):
+    return 1 << (n - 1).bit_length()
+
+
+class _FusedMLP:
+    """Fuse mlp_fc(+bias) -> gelu -> mlp_proj into ONE load_pdi multi-launch ELF.
+
+    Replaces three separate NPU dispatches (each paying the ~147ms hw_context
+    rebuild) with a single fused ELF dispatched through one persistent
+    hw_context + one xrt.run. See docs/load_pdi_multilaunch_design.md.
+
+    Per layer (lazily on first use) builds an NPUChain with pre-prepped weights:
+      op0 mlp_fc:   C0 = [x|1] @ [W_fc ; b_fc]   (bias folded via augmented-K)
+      op1 gelu:     G  = gelu(C0)                (f32 -> bf16)
+      op2 mlp_proj: C2 = G @ W_proj              (bf16 -> f32)
+    mlp_proj's bias is added on host post-readback (its A is gelu's output, so
+    the augmented-K fold can't apply; this is a boundary op, the 3 compute ops
+    still live in one ELF).
+
+    Shapes (HF stores c_fc/c_proj as (in,out), used as x@W directly):
+      W_fc=(D, H), b_fc=(H,)  ; W_proj=(H, D), b_proj=(D,).  D=n_embd, H=mlp_dim.
+    K0_pad = next_pow2(D+1); HID_pad = next_pow2(H); both matmuls single-block.
+    M is padded to 256 (BLOCK_M). Only valid rows/cols are read back.
+    """
+
+    def __init__(self, n_embd, mlp_dim, matmul_script, gelu_f32in_script):
+        self.D = n_embd
+        self.H = mlp_dim
+        self.matmul_script = matmul_script
+        self.gelu_script = gelu_f32in_script
+        self.BM = self.BN = 256
+        self.K0_pad = _next_pow2(self.D + 1)       # +1 bias row
+        self.HID_pad = _next_pow2(self.H)
+        self._chains = {}    # layer_idx -> (NPUChain, B0, B2, b_proj)
+        self._mm = None
+        self._gelu = None
+        self._build_kernels()
+
+    def _build_kernels(self):
+        import triton
+        import triton.language as tl
+
+        @triton.jit
+        def _mm_kernel(A, B, C,
+                       M: tl.constexpr, N: tl.constexpr, K: tl.constexpr,
+                       sam: tl.constexpr, sak: tl.constexpr,
+                       sbk: tl.constexpr, sbn: tl.constexpr,
+                       scm: tl.constexpr, scn: tl.constexpr,
+                       BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr,
+                       BLOCK_SIZE_K: tl.constexpr):
+            pid_m = tl.program_id(0)
+            pid_n = tl.program_id(1)
+            offs_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+            offs_n = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+            offs_k = tl.arange(0, BLOCK_SIZE_K)
+            a = tl.load(A + offs_m[:, None] * sam + offs_k[None, :] * sak)
+            b = tl.load(B + offs_k[:, None] * sbk + offs_n[None, :] * sbn)
+            c = tl.dot(a, b)
+            tl.store(C + offs_m[:, None] * scm + offs_n[None, :] * scn, c)
+
+        @triton.jit
+        def _gelu_f32in(X, Y, n_elements: tl.constexpr, BLOCK_SIZE: tl.constexpr):
+            pid = tl.program_id(0)
+            offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+            xf = tl.load(X + offsets[:])
+            k: tl.constexpr = 0.7978845608028654
+            z = k * (xf + 0.044715 * xf * xf * xf)
+            y = (xf * tl.sigmoid(2.0 * z)).to(tl.bfloat16)
+            tl.store(Y + offsets[:], y)
+
+        self._mm = _mm_kernel
+        self._gelu = _gelu_f32in
+
+    def _prep_weights(self, w_fc, b_fc, w_proj, b_proj):
+        """Build padded, bias-folded static weight arrays (numpy bf16)."""
+        from ml_dtypes import bfloat16
+        D, H, K0_pad, HID_pad = self.D, self.H, self.K0_pad, self.HID_pad
+        w_fc = w_fc.to(torch.float32).cpu().numpy()      # (D, H)
+        b_fc = b_fc.to(torch.float32).cpu().numpy()      # (H,)
+        w_proj = w_proj.to(torch.float32).cpu().numpy()  # (H, D)
+        # B0 = [W_fc ; b_fc] padded to (K0_pad, HID_pad)
+        B0 = np.zeros((K0_pad, HID_pad), dtype=bfloat16)
+        B0[:D, :H] = w_fc.astype(bfloat16)
+        B0[D, :H] = b_fc.astype(bfloat16)
+        # B2 = W_proj padded to (HID_pad, D)
+        B2 = np.zeros((HID_pad, D), dtype=bfloat16)
+        B2[:H, :D] = w_proj.astype(bfloat16)
+        return B0, B2
+
+    def _chain_for(self, layer_idx, w_fc, b_fc, w_proj, b_proj):
+        if layer_idx in self._chains:
+            return self._chains[layer_idx]
+        from triton.backends.amd_triton_npu.multilaunch import NPUChain
+        D, H, K0_pad, HID_pad, BM, BN = (
+            self.D, self.H, self.K0_pad, self.HID_pad, self.BM, self.BN)
+        M_pad = self.BM  # single M-block; valid rows sliced on readback
+        B0, B2 = self._prep_weights(w_fc, b_fc, w_proj, b_proj)
+        b_proj_np = b_proj.to(torch.float32).cpu().numpy()
+
+        tAf = torch.zeros((M_pad, K0_pad), dtype=torch.bfloat16)
+        tB0 = torch.zeros((K0_pad, HID_pad), dtype=torch.bfloat16)
+        tC0 = torch.zeros((M_pad, HID_pad), dtype=torch.float32)
+        tXg = torch.zeros(M_pad * HID_pad, dtype=torch.float32)
+        tG = torch.zeros(M_pad * HID_pad, dtype=torch.bfloat16)
+        tGm = torch.zeros((M_pad, HID_pad), dtype=torch.bfloat16)
+        tB2 = torch.zeros((HID_pad, D), dtype=torch.bfloat16)
+        tC2 = torch.zeros((M_pad, D), dtype=torch.float32)
+
+        chain = NPUChain(f"gpt2_mlp_L{layer_idx}")
+        chain.add(self._mm, grid=(M_pad // BM, HID_pad // BN),
+                  arg_map={0: 0, 1: 1, 2: 2},
+                  args=(tAf, tB0, tC0, M_pad, HID_pad, K0_pad,
+                        K0_pad, 1, HID_pad, 1, HID_pad, 1),
+                  constexprs={"BLOCK_SIZE_M": BM, "BLOCK_SIZE_N": BN,
+                              "BLOCK_SIZE_K": K0_pad},
+                  transform_script=self.matmul_script)
+        chain.add(self._gelu, grid=((M_pad * HID_pad) // 1024,),
+                  arg_map={0: 2, 1: 3},
+                  args=(tXg, tG, M_pad * HID_pad),
+                  constexprs={"BLOCK_SIZE": 1024},
+                  transform_script=self.gelu_script)
+        chain.add(self._mm, grid=(M_pad // BM, D // BN),
+                  arg_map={0: 3, 1: 4, 2: 5},
+                  args=(tGm, tB2, tC2, M_pad, D, HID_pad,
+                        HID_pad, 1, D, 1, D, 1),
+                  constexprs={"BLOCK_SIZE_M": BM, "BLOCK_SIZE_N": BN,
+                              "BLOCK_SIZE_K": HID_pad},
+                  transform_script=self.matmul_script)
+        self._chains[layer_idx] = (chain, B0, B2, b_proj_np)
+        return self._chains[layer_idx]
+
+    def run(self, layer_idx, x_norm, w_fc, b_fc, w_proj, b_proj):
+        """Run the fused MLP for one layer. x_norm: (B,S,D) tensor (CPU).
+
+        Returns mlp_out (B,S,D) torch f32 tensor (before the residual add),
+        matching what `_linear(mlp_proj)` returns in the unfused path.
+        """
+        from ml_dtypes import bfloat16
+        D, H, K0_pad, HID_pad = self.D, self.H, self.K0_pad, self.HID_pad
+        chain, B0, B2, b_proj_np = self._chain_for(
+            layer_idx, w_fc, b_fc, w_proj, b_proj)
+
+        orig_shape = x_norm.shape
+        x2d = x_norm.reshape(-1, D).to(torch.float32).cpu().numpy()  # (M_real, D)
+        M_real = x2d.shape[0]
+        M_pad = self.BM
+        if M_real > M_pad:
+            # Multiple M-blocks not handled by this single-block chain; caller
+            # should keep prefill on the unfused path for long sequences.
+            raise ValueError(
+                f"_FusedMLP only supports M<={M_pad} (got {M_real}); "
+                "use the unfused MLP path for longer sequences."
+            )
+        # A_aug = [x | 1 | 0...] padded to (M_pad, K0_pad)
+        A_aug = np.zeros((M_pad, K0_pad), dtype=bfloat16)
+        A_aug[:M_real, :D] = x2d.astype(bfloat16)
+        A_aug[:M_real, D] = bfloat16(1.0)
+        C0 = np.zeros((M_pad, HID_pad), dtype=np.float32)
+        G = np.zeros(M_pad * HID_pad, dtype=bfloat16)
+        C2 = np.zeros((M_pad, D), dtype=np.float32)
+
+        out = chain.run([A_aug, B0, C0, G, B2, C2],
+                        bo_key=f"gpt2_mlp_L{layer_idx}",
+                        static_indices={1, 4},
+                        intermediate_indices={2, 3},
+                        output_indices={5})
+        c2 = out[5].astype(np.float32)[:M_real, :D] + b_proj_np  # host bias
+        mlp_out = torch.from_numpy(c2.copy())
+        return mlp_out.reshape(orig_shape)
+
+
 class GPT2Model:
     """
     GPT-2 inference model using Triton kernels (config-driven; any GPT-2 size).
@@ -163,6 +335,21 @@ class GPT2Model:
         self.add_script = os.path.join(self.script_dir, "transform_add_aie2p.mlir")
         self.softmax_script = os.path.join(self.script_dir, "transform_softmax_aie2p.mlir")
         self.layernorm_script = os.path.join(self.script_dir, "transform_layernorm_aie2p.mlir")
+        self.gelu_f32in_script = os.path.join(self.script_dir, "transform_gelu_f32in_aie2p.mlir")
+
+        # Optional: fuse mlp_fc->gelu->mlp_proj into one load_pdi ELF on NPU.
+        # Opt-in via AMD_TRITON_NPU_FUSED_MLP=1; active whenever the MLP runs on
+        # NPU -- i.e. hetero/hetero-fast (MLP routed to NPU) or npu mode (all NPU).
+        # See docs/load_pdi_multilaunch_design.md.
+        self._fused_mlp = None
+        if (
+            (self._is_hetero or backend == "npu")
+            and os.getenv("AMD_TRITON_NPU_FUSED_MLP", "0") == "1"
+        ):
+            self._fused_mlp = _FusedMLP(
+                self.n_embd, self.mlp_dim,
+                self.matmul_script, self.gelu_f32in_script,
+            )
 
     def _load_weights(self, sd):
         """Map HuggingFace GPT-2 weight names to internal parameters."""
@@ -545,12 +732,30 @@ class GPT2Model:
                 mlp_fc_be = self.op_backend["mlp_fc"]
                 gelu_be = self.op_backend["gelu"]
                 mlp_proj_be = self.op_backend["mlp_proj"]
-                with self.timer.track("mlp_fc"):
-                    h = self._linear(x_norm, npu_w["mlp_fc_weight"], npu_w["mlp_fc_bias"], backend=mlp_fc_be)
-                with self.timer.track("gelu"):
-                    h = self._gelu(h, backend=gelu_be)
-                with self.timer.track("mlp_proj"):
-                    mlp_out = self._linear(h, npu_w["mlp_proj_weight"], npu_w["mlp_proj_bias"], backend=mlp_proj_be)
+                # Fused MLP fast path: one load_pdi ELF for fc->gelu->proj. Only
+                # when all three route to NPU and the (flattened) row count fits a
+                # single M-block (<=256); otherwise fall through to the unfused
+                # path. mlp_proj bias is applied inside the fused helper.
+                _fused_ok = (
+                    self._fused_mlp is not None
+                    and mlp_fc_be == "npu" and gelu_be == "npu"
+                    and mlp_proj_be == "npu"
+                    and x_norm.reshape(-1, self.n_embd).shape[0] <= 256
+                )
+                if _fused_ok:
+                    with self.timer.track("mlp_fused"):
+                        mlp_out = self._fused_mlp.run(
+                            i, x_norm,
+                            npu_w["mlp_fc_weight"], npu_w["mlp_fc_bias"],
+                            npu_w["mlp_proj_weight"], npu_w["mlp_proj_bias"],
+                        )
+                else:
+                    with self.timer.track("mlp_fc"):
+                        h = self._linear(x_norm, npu_w["mlp_fc_weight"], npu_w["mlp_fc_bias"], backend=mlp_fc_be)
+                    with self.timer.track("gelu"):
+                        h = self._gelu(h, backend=gelu_be)
+                    with self.timer.track("mlp_proj"):
+                        mlp_out = self._linear(h, npu_w["mlp_proj_weight"], npu_w["mlp_proj_bias"], backend=mlp_proj_be)
 
                 with self.timer.track("add2"):
                     x = self._add(x, mlp_out, backend=add_be)
@@ -569,12 +774,30 @@ class GPT2Model:
                     x = self._add(x, attn_out)
                 with self.timer.track("ln2"):
                     x_norm = self._layernorm(x, layer["ln2_weight"], layer["ln2_bias"])
-                with self.timer.track("mlp_fc"):
-                    h = self._linear(x_norm, layer["mlp_fc_weight"], layer["mlp_fc_bias"])
-                with self.timer.track("gelu"):
-                    h = self._gelu(h)
-                with self.timer.track("mlp_proj"):
-                    mlp_out = self._linear(h, layer["mlp_proj_weight"], layer["mlp_proj_bias"])
+                # Fused MLP fast path (npu mode): one load_pdi ELF for
+                # fc->gelu->proj, when the flattened row count fits a single
+                # M-block (<=256); else the unfused 3-dispatch path. Not used on
+                # gpu (the fused helper builds NPU ELFs). mlp_proj bias is applied
+                # inside the fused helper.
+                _fused_ok = (
+                    self._fused_mlp is not None
+                    and self.backend == "npu"
+                    and x_norm.reshape(-1, self.n_embd).shape[0] <= 256
+                )
+                if _fused_ok:
+                    with self.timer.track("mlp_fused"):
+                        mlp_out = self._fused_mlp.run(
+                            i, x_norm,
+                            layer["mlp_fc_weight"], layer["mlp_fc_bias"],
+                            layer["mlp_proj_weight"], layer["mlp_proj_bias"],
+                        )
+                else:
+                    with self.timer.track("mlp_fc"):
+                        h = self._linear(x_norm, layer["mlp_fc_weight"], layer["mlp_fc_bias"])
+                    with self.timer.track("gelu"):
+                        h = self._gelu(h)
+                    with self.timer.track("mlp_proj"):
+                        mlp_out = self._linear(h, layer["mlp_proj_weight"], layer["mlp_proj_bias"])
                 with self.timer.track("add2"):
                     x = self._add(x, mlp_out)
 
