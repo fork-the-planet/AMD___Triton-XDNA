@@ -122,9 +122,9 @@ def triton_softmax(x, causal_mask=None, backend="gpu", transform_script=None):
         )
     else:
         # NPU path
-        # The NPU softmax transform only supports grid=(1,1) (single block launch).
-        # Process rows in chunks of BLOCK_SIZE, one kernel call per chunk.
-        BLOCK_SIZE = 4
+        # The NPU softmax transform only supports grid=(1,1) (single block
+        # launch), so rows are processed in BLOCK_SIZE-row chunks, one kernel
+        # dispatch per chunk.
 
         # NPU requires power-of-2 arange sizes for n_cols.
         # Minimum 128: the transform script vectorizes at tile_sizes [0, 32],
@@ -134,6 +134,18 @@ def triton_softmax(x, causal_mask=None, backend="gpu", transform_script=None):
         MIN_NPU_COLS = 128
         n_cols_padded = 1 << (n_cols - 1).bit_length() if n_cols > 1 else 1
         n_cols_padded = max(n_cols_padded, MIN_NPU_COLS)
+
+        # Rows per launch. The softmax transform maps the row dimension to a 1D
+        # herd across the device's 8 columns, packing 2 rows per core (transform
+        # tiles the batch dim by 2), so one launch covers 16 rows (8 cores x 2).
+        # BLOCK_SIZE was a fixed 4 => ceil(n_rows/4) dispatches per softmax
+        # (3 for gpt2's 12 attention rows in decode, ~39 in prefill), each paying
+        # full per-launch overhead -- the dominant NPU-mode attention cost. At 16
+        # a decode softmax (n_rows = n_head = 12..16) is a single dispatch, and
+        # prefill's dispatch count drops ~4x. Must stay 16 to match the
+        # transform's tile-by-2 over 8 columns; per-core L1 use is only
+        # 2 x n_cols_padded, so it is safe across KV lengths.
+        BLOCK_SIZE = 16
 
         # Pad rows to multiple of BLOCK_SIZE
         n_rows_padded = math.ceil(n_rows / BLOCK_SIZE) * BLOCK_SIZE

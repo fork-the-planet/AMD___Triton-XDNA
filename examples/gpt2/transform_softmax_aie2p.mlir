@@ -122,9 +122,15 @@ module attributes {transform.with_named_sequence} {
         %generic3_output_buf, %new_generic3 = transform.structured.bufferize_to_allocation %generic3
           {memory_space = 1, bufferize_destination_only, emit_dealloc} : !transform.any_op
 
-        // Tile the final operation with tile size [1] for batch dimension
+        // Tile the row (batch) dimension by 2 so each herd core handles 2 rows.
+        // par_to_herd (PHASE 6) maps this 1D forall to a 1D herd across columns;
+        // npu2 has 8 columns, so a tile of [1] caps a single launch at 8 rows
+        // (BLOCK_SIZE<=8 in the wrapper -> ceil(n_head/8) dispatches per softmax).
+        // Packing 2 rows/core lets one launch cover 16 rows (8 cores x 2), so a
+        // decode softmax over n_head=12..16 rows is a single dispatch. The
+        // wrapper sets BLOCK_SIZE=16 to match (forall = 16/2 = 8 = #columns).
         %tiled_generic_3, %forall_5 =
-        transform.structured.tile_using_forall %generic3 tile_sizes [1]  : (!transform.any_op) -> (!transform.any_op, !transform.any_op)
+        transform.structured.tile_using_forall %generic3 tile_sizes [2]  : (!transform.any_op) -> (!transform.any_op, !transform.any_op)
 
         // Fuse producer operations into the tiled loop in reverse dependency order
         // This creates a producer-consumer fusion chain where each operation is
@@ -208,11 +214,17 @@ module attributes {transform.with_named_sequence} {
         // PURPOSE: Convert operations to forms that can be mapped to AIE vector
         // intrinsics or scalar operations as appropriate.
 
-        // Tile generic operations for vectorization with tile size 32 (AIE2P vector width)
+        // Tile generic operations for vectorization: rows by 1, cols by 32 (AIE2P
+        // vector width). The row tile of 1 is required now that the herd packs 2
+        // rows per core (batch tiled by 2 in PHASE 3): without it the per-row
+        // softmax reduction vectorizes over the full (2, 32) core tile and emits a
+        // vector.transpose (32x2 -> 2x32) that AIE cannot legalize. Tiling rows by
+        // 1 keeps every vector op (1, 32) -> leading-1 dim is cast away, no
+        // transpose.
         %linalg_generics = transform.structured.match ops{["linalg.generic"]} in %arg1 : (!transform.any_op) -> !transform.any_op
-        %inner_most_generics, %vec_loops:1 =
-          transform.structured.tile_using_for %linalg_generics tile_sizes [0, 32]
-          : (!transform.any_op) -> (!transform.any_op, !transform.any_op)
+        %inner_most_generics, %vec_loops:2 =
+          transform.structured.tile_using_for %linalg_generics tile_sizes [1, 32]
+          : (!transform.any_op) -> (!transform.any_op, !transform.any_op, !transform.any_op)
 
         //===================================================================
         // PHASE 10: AIR Constructs Mapping
