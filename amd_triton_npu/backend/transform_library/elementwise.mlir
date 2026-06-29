@@ -26,8 +26,14 @@ transform.named_sequence @fuse_elementwise_and_canonicalize(
 // With tile_sizes the width was ceildiv(block, tile): a single trip when the
 // block fits one tile (the forall is then folded away, leaving no herd) and
 // wider than the target's column count for large blocks (placement fails). A
-// fixed thread count avoids both. NOTE: the count below is sized for the npu1
-// 4-column array; targets with more columns (AIE2P) may want a larger value.
+// fixed thread count avoids both.
+//
+// The count is intentionally hardcoded to 4 for the npu1 4-column array. This
+// sequence is also included by AIE2P (npu2) elementwise scripts, where 4 caps
+// the herd at 4 of the 8 available columns -- correct, but it under-utilizes
+// the array for large blocks. Making the count target-aware (a per-target
+// sequence, or a driver-injected parameter) is left as a follow-up; 4 is kept
+// for now because it is the value validated on npu1 hardware.
 transform.named_sequence @flatten_tile_forall(
     %module: !transform.any_op {transform.readonly}) {
   %op = transform.structured.match ops{["linalg.generic"]} in %module
@@ -41,6 +47,7 @@ transform.named_sequence @flatten_tile_forall(
   %op_1 = transform.structured.match ops{["linalg.generic"]} in %module
       : (!transform.any_op) -> !transform.any_op
   %tiled_op_1, %forall_op_1 =
+      // 4 = npu1 column count (hardcoded; see note above for AIE2P/npu2).
       transform.structured.tile_using_forall %op_1 num_threads [4]
       : (!transform.any_op) -> (!transform.any_op, !transform.any_op)
   transform.yield
