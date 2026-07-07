@@ -15,12 +15,10 @@ import triton.language as tl
 
 
 @triton.autotune(
+    # Single fixed config: offline-swept winner for both S=1 (decode) and S=4
+    # (prefill). See sandbox/sweep_dump.py.
     configs=[
         triton.Config({'BLOCK_M': 16, 'BLOCK_N': 32}, num_warps=4),
-        triton.Config({'BLOCK_M': 32, 'BLOCK_N': 32}, num_warps=4),
-        triton.Config({'BLOCK_M': 64, 'BLOCK_N': 32}, num_warps=4),
-        triton.Config({'BLOCK_M': 32, 'BLOCK_N': 64}, num_warps=4),
-        triton.Config({'BLOCK_M': 64, 'BLOCK_N': 64}, num_warps=4),
     ],
     key=['seq_len'],
 )

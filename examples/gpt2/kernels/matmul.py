@@ -18,13 +18,11 @@ import triton.language as tl
 # GPU kernel: K-tiled matmul with masking and autotuning
 # ---------------------------------------------------------------------------
 @triton.autotune(
+    # Single fixed config: offline-swept winner for the qkv shape (M*,2304,768).
+    # The per-process autotune benchmark sweep (compile+time every config each
+    # run) dominated startup for these small shapes. See sandbox/sweep_dump.py.
     configs=[
         triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 4}, num_warps=4),
-        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 4}, num_warps=4),
-        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 4}, num_warps=4),
-        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_warps=4),
-        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_warps=4),
-        triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 4}, num_warps=4),
     ],
     key=['M', 'N', 'K'],
 )
@@ -242,10 +240,9 @@ def triton_linear(x, weight, bias=None, backend="gpu", transform_script=None):
 # GPU kernel: batched matmul for attention (Q@K^T, attn@V)
 # ---------------------------------------------------------------------------
 @triton.autotune(
+    # Single fixed config: bmm is not on the hot path (attention uses the fused
+    # kernel), but pin it to avoid any autotune sweep if ever called.
     configs=[
-        triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 4}, num_warps=4),
-        triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 4}, num_warps=4),
-        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 4}, num_warps=4),
         triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 4}, num_warps=4),
     ],
     key=['M', 'N', 'K'],

@@ -145,7 +145,8 @@ class _FusedMLP:
         self.matmul_script = matmul_script
         self.gelu_script = gelu_f32in_script
         self.add_script = add_f32_script
-        self.BM = self.BN = 256
+        self.BM = 128
+        self.BN = 256
         self.K0_pad = _next_pow2(self.D + 1)       # +1 bias row
         self.HID_pad = _next_pow2(self.H)
         # One shared chain (one stitched ELF + one hw_context) serves every
@@ -158,6 +159,18 @@ class _FusedMLP:
         self._mm = None
         self._gelu = None
         self._build_kernels()
+        # Persistent host staging buffers (shape fixed across all calls/layers).
+        # Reused every run() to avoid re-allocating/zeroing ~8MB per dispatch.
+        # Rows beyond M_real hold stale data but are discarded on readback (the
+        # matmul is row-independent and output is sliced to [:M_real]). K-padding
+        # columns (D+1:) stay zero (written once here, never touched again).
+        from ml_dtypes import bfloat16 as _bf16
+        self._A_aug = np.zeros((self.BM, self.K0_pad), dtype=_bf16)
+        self._C0 = np.zeros((self.BM, self.HID_pad), dtype=np.float32)
+        self._G = np.zeros(self.BM * self.HID_pad, dtype=_bf16)
+        self._C2 = np.zeros((self.BM, self.D), dtype=np.float32)
+        self._R = np.zeros((self.BM, self.D), dtype=np.float32)
+        self._OUT = np.zeros((self.BM, self.D), dtype=np.float32)
 
     def _build_kernels(self):
         import triton
@@ -325,16 +338,13 @@ class _FusedMLP:
                 f"_FusedMLP only supports M<={M_pad} (got {M_real}); "
                 "use the unfused MLP path for longer sequences."
             )
-        # A_aug = [x | 1 | 0...] padded to (M_pad, K0_pad)
-        A_aug = np.zeros((M_pad, K0_pad), dtype=bfloat16)
+        # A_aug = [x | 1 | 0...]; reuse persistent buffers (only [:M_real] read
+        # back, so stale rows beyond M_real are harmless).
+        A_aug, C0, G, C2, R, OUT = (
+            self._A_aug, self._C0, self._G, self._C2, self._R, self._OUT)
         A_aug[:M_real, :D] = x2d.astype(bfloat16)
         A_aug[:M_real, D] = bfloat16(1.0)
-        C0 = np.zeros((M_pad, HID_pad), dtype=np.float32)
-        G = np.zeros(M_pad * HID_pad, dtype=bfloat16)
-        C2 = np.zeros((M_pad, D), dtype=np.float32)
-        R = np.zeros((M_pad, D), dtype=np.float32)
         R[:M_real, :D] = res2d
-        OUT = np.zeros((M_pad, D), dtype=np.float32)
 
         # On-device: OUT = C2 + R (residual). Host: + b_proj broadcast over M,
         # giving x + (mlp_proj_out + b_proj) = x + mlp_out.
@@ -407,14 +417,14 @@ class GPT2Model:
         self.layernorm_script = os.path.join(self.script_dir, "transform_layernorm_aie2p.mlir")
         self.gelu_f32in_script = os.path.join(self.script_dir, "transform_gelu_f32in_aie2p.mlir")
 
-        # Optional: fuse mlp_fc->gelu->mlp_proj into one load_pdi ELF on NPU.
-        # Opt-in via AMD_TRITON_NPU_FUSED_MLP=1; active whenever the MLP runs on
-        # NPU -- i.e. hetero/hetero-fast (MLP routed to NPU) or npu mode (all NPU).
-        # See docs/load_pdi_multilaunch_design.md.
+        # Fuse mlp_fc->gelu->mlp_proj into one load_pdi ELF on NPU. On by default
+        # whenever the MLP runs on NPU (hetero/hetero-fast or npu mode); the
+        # unfused per-op path is ~10x slower, so it's only kept as an escape
+        # hatch via AMD_TRITON_NPU_FUSED_MLP=0. See docs/load_pdi_multilaunch_design.md.
         self._fused_mlp = None
         if (
             (self._is_hetero or backend == "npu")
-            and os.getenv("AMD_TRITON_NPU_FUSED_MLP", "0") == "1"
+            and os.getenv("AMD_TRITON_NPU_FUSED_MLP", "1") == "1"
         ):
             self._fused_mlp = _FusedMLP(
                 self.n_embd, self.mlp_dim,
@@ -777,8 +787,13 @@ class GPT2Model:
                 # hetero: LN/MLP weights are already on CPU in layer dict
                 npu_w = self._cpu_layers[i] if hasattr(self, '_cpu_layers') else layer
                 ln1_be = self.op_backend["layernorm"]
+                # LayerNorm on tiny (<=4x768) CPU tensors: NPU dispatch overhead
+                # (~1.5-4ms) dwarfs the compute, so normalize on host.
                 with self.timer.track("ln1"):
-                    x_norm = self._layernorm(x, npu_w["ln1_weight"], npu_w["ln1_bias"], backend=ln1_be)
+                    x_norm = torch.nn.functional.layer_norm(
+                        x.to(torch.float32), (self.n_embd,),
+                        npu_w["ln1_weight"].to(torch.float32),
+                        npu_w["ln1_bias"].to(torch.float32), eps=LN_EPS)
                 with self.timer.track("to_gpu"):
                     x_norm = self._to_gpu(x_norm)
 
@@ -791,14 +806,20 @@ class GPT2Model:
                     attn_out = self._to_cpu(attn_out)
 
                 add_be = self.op_backend["add"]
+                # add1 is a trivial elementwise residual add on tiny (<=4x768)
+                # CPU tensors; NPU dispatch overhead (~2.8ms) dwarfs the compute,
+                # so do it on host. No transfer (x and attn_out already on CPU).
                 with self.timer.track("add1"):
-                    x = self._add(x, attn_out, backend=add_be)
+                    x = x.to(torch.float32) + attn_out.to(torch.float32)
 
                 # NPU ops: use CPU-resident weights
                 npu_w = self._cpu_layers[i] if hasattr(self, '_cpu_layers') else layer
                 ln2_be = self.op_backend["layernorm"]
                 with self.timer.track("ln2"):
-                    x_norm = self._layernorm(x, npu_w["ln2_weight"], npu_w["ln2_bias"], backend=ln2_be)
+                    x_norm = torch.nn.functional.layer_norm(
+                        x.to(torch.float32), (self.n_embd,),
+                        npu_w["ln2_weight"].to(torch.float32),
+                        npu_w["ln2_bias"].to(torch.float32), eps=LN_EPS)
 
                 mlp_fc_be = self.op_backend["mlp_fc"]
                 gelu_be = self.op_backend["gelu"]
@@ -811,7 +832,7 @@ class GPT2Model:
                     self._fused_mlp is not None
                     and mlp_fc_be == "npu" and gelu_be == "npu"
                     and mlp_proj_be == "npu"
-                    and x_norm.reshape(-1, self.n_embd).shape[0] <= 256
+                    and x_norm.reshape(-1, self.n_embd).shape[0] <= self._fused_mlp.BM
                 )
                 if _fused_ok:
                     # The fused chain folds the post-MLP residual add (op3), so
@@ -854,7 +875,7 @@ class GPT2Model:
                 _fused_ok = (
                     self._fused_mlp is not None
                     and self.backend == "npu"
-                    and x_norm.reshape(-1, self.n_embd).shape[0] <= 256
+                    and x_norm.reshape(-1, self.n_embd).shape[0] <= self._fused_mlp.BM
                 )
                 if _fused_ok:
                     # run() folds the post-MLP residual add (op3), returning
@@ -877,11 +898,13 @@ class GPT2Model:
 
         # Final LayerNorm
         if hetero and not decode_gpu:
+            # Final LN on CPU: tiny tensor, NPU dispatch overhead dominates.
             with self.timer.track("ln_f"):
-                ln_f_be = self.op_backend["layernorm"]
                 ln_f_w = self._cpu_ln_f_weight if hasattr(self, '_cpu_ln_f_weight') else self.ln_f_weight
                 ln_f_b = self._cpu_ln_f_bias if hasattr(self, '_cpu_ln_f_bias') else self.ln_f_bias
-                x = self._layernorm(x, ln_f_w, ln_f_b, backend=ln_f_be)
+                x = torch.nn.functional.layer_norm(
+                    x.to(torch.float32), (self.n_embd,),
+                    ln_f_w.to(torch.float32), ln_f_b.to(torch.float32), eps=LN_EPS)
         elif hetero:
             with self.timer.track("ln_f"):
                 x = self._layernorm(x, self.ln_f_weight, self.ln_f_bias, backend="gpu")
