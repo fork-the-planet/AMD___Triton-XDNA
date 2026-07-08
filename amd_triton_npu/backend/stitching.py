@@ -154,8 +154,9 @@ def _wrap_ir_in_launch(mlir_text):
     # Find the body (between func line and return)
     body_start = func_line_idx + 1
     body_end = None
+    return_re = re.compile(r"^\s*return(\s|$|//|loc\()")
     for i in range(len(lines) - 1, body_start, -1):
-        if lines[i].strip() == "return":
+        if return_re.match(lines[i]):
             body_end = i
             break
 

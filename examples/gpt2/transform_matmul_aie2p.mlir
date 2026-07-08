@@ -32,7 +32,7 @@ module attributes {transform.with_named_sequence} {
 
         %result_l2 = transform.structured.match ops{["linalg.fill"]} in %arg1 : (!transform.any_op) -> !transform.any_op
         %result_l2_buffer, %result_t2_new = transform.structured.bufferize_to_allocation %result_l2
-            {memory_space = 1, bufferize_destination_only, mempcy = "linalg.copy", emit_dealloc} : !transform.any_op
+            {memory_space = 1, bufferize_destination_only, memcpy_op = "linalg.copy", emit_dealloc} : !transform.any_op
 
     //==========================================================================
     // PHASE 3: PACK MATMUL FOR VECTORIZED COMPUTATION

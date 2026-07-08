@@ -53,7 +53,8 @@ def _lift_tensor_numel_limit():
     import triton._utils as _tu
 
     cap = 1 << 22  # 256 (BLOCK_M) x 8192 (largest padded K) = 2**21, with headroom
-    if _tu.TRITON_MAX_TENSOR_NUMEL < cap:
+    cur = getattr(_tu, "TRITON_MAX_TENSOR_NUMEL", None)
+    if cur is not None and cur < cap:
         _tu.TRITON_MAX_TENSOR_NUMEL = cap
 
 
@@ -1506,16 +1507,13 @@ def _aircc_compile(air_mlir_path, output_format, npu_version, air_proj_path):
             mlir_aie_bin = str(Path(mlir_aie.__path__[0]) / "bin")
         except ImportError:
             mlir_aie_bin = str(
-                Path(aircc.__file__).resolve().parent.parent.parent
-                / "mlir_aie"
-                / "bin"
+                Path(aircc.__file__).resolve().parent.parent.parent / "mlir_aie" / "bin" 
             )
+
         if os.path.isdir(mlir_aie_bin) and mlir_aie_bin not in os.environ.get(
             "PATH", ""
         ):
-            os.environ["PATH"] = (
-                mlir_aie_bin + os.pathsep + os.environ.get("PATH", "")
-            )
+            os.environ["PATH"] = mlir_aie_bin + os.pathsep + os.environ.get("PATH", "")
 
     if output_format == "elf":
         elf_path = os.path.join(air_proj_path, "aie.elf")
@@ -1576,9 +1574,7 @@ def _aircc_compile(air_mlir_path, output_format, npu_version, air_proj_path):
                 if stderr_buf is not None:
                     stderr_buf.write(result.stdout)
                 else:
-                    sys.stderr.write(
-                        result.stdout.decode("utf-8", errors="replace")
-                    )
+                    sys.stderr.write(result.stdout.decode("utf-8", errors="replace"))
             raise subprocess.CalledProcessError(
                 result.returncode,
                 aircc_cmd,
@@ -1608,6 +1604,45 @@ _global_module_cache = {}
 # Last dispatched module — set after each dispatch so callers can capture it
 # for direct fast-path calls (bypassing Triton JIT entirely).
 _last_dispatched_module = None
+
+
+def _get_cached_aircc_artifacts(cache, output_format):
+    """Return cached aircc artifacts (elf/xclbin) or None if the set is incomplete.
+
+    Keys mirror ``_put_aircc_artifacts``:
+        elf:    {"elf_path", "elf_kernel_name_path"}
+        xclbin: {"xclbin_path", "insts_path"}
+    """
+    if output_format == "elf":
+        elf_path = cache.get_file("aie.elf")
+        kname_path = cache.get_file("elf_kernel_name.txt")
+        if elf_path is None or kname_path is None:
+            return None
+        return {"elf_path": elf_path, "elf_kernel_name_path": kname_path}
+    xclbin_path = cache.get_file("aie.xclbin")
+    insts_path = cache.get_file("insts.bin")
+    if xclbin_path is None or insts_path is None:
+        return None
+    return {"xclbin_path": xclbin_path, "insts_path": insts_path}
+
+
+def _put_aircc_artifacts(cache, artifacts, output_format):
+    """Persist aircc artifacts; return cached paths in the same shape as the getter.
+
+    ``artifacts`` is the dict returned by ``_aircc_compile``.
+    """
+    if output_format == "elf":
+        with open(artifacts["elf_path"], "rb") as f:
+            elf_path = cache.put(f.read(), "aie.elf", binary=True)
+        kname_path = cache.put(
+            artifacts["elf_kernel_name"].encode(), "elf_kernel_name.txt"
+        )
+        return {"elf_path": elf_path, "elf_kernel_name_path": kname_path}
+    with open(artifacts["xclbin_path"], "rb") as f:
+        xclbin_path = cache.put(f.read(), "aie.xclbin", binary=True)
+    with open(artifacts["insts_path"], "rb") as f:
+        insts_path = cache.put(f.read(), "insts.bin")
+    return {"xclbin_path": xclbin_path, "insts_path": insts_path}
 
 
 def compile_module(
@@ -1703,12 +1738,14 @@ def compile_module(
         name = "__npu_dispatch"
         filename = f"{name}.pyd" if IS_WINDOWS else f"{name}.so"
         cache_path = cache.get_file(filename)
-        if output_format == "elf":
-            cache_elf_path = cache.get_file("aie.elf")
-            cache_elf_kernel_path = cache.get_file("elf_kernel_name.txt")
-        else:
-            cache_xclbin_path = cache.get_file("aie.xclbin")
-            cache_insts_path = cache.get_file("insts.bin")
+        cached_artifacts = _get_cached_aircc_artifacts(cache, output_format)
+        if cached_artifacts is not None:
+            if output_format == "elf":
+                cache_elf_path = cached_artifacts["elf_path"]
+                cache_elf_kernel_path = cached_artifacts["elf_kernel_name_path"]
+            else:
+                cache_xclbin_path = cached_artifacts["xclbin_path"]
+                cache_insts_path = cached_artifacts["insts_path"]
 
         if cache_path is None:
             with tempfile.TemporaryDirectory() as tmpdir:
@@ -1804,19 +1841,15 @@ def compile_module(
                 # Cache format-specific artifacts first, then the .so last.
                 # This avoids partial cache entries if aircc or kernel name
                 # extraction fails -- the .so is the gate for cache hits.
+                cached_artifacts = _put_aircc_artifacts(
+                    cache, artifacts, output_format
+                )
                 if output_format == "elf":
-                    with open(artifacts["elf_path"], "rb") as f:
-                        cache_elf_path = cache.put(f.read(), "aie.elf", binary=True)
-                    cache_elf_kernel_path = cache.put(
-                        artifacts["elf_kernel_name"].encode(), "elf_kernel_name.txt"
-                    )
+                    cache_elf_path = cached_artifacts["elf_path"]
+                    cache_elf_kernel_path = cached_artifacts["elf_kernel_name_path"]
                 else:
-                    with open(artifacts["xclbin_path"], "rb") as f:
-                        cache_xclbin_path = cache.put(
-                            f.read(), "aie.xclbin", binary=True
-                        )
-                    with open(artifacts["insts_path"], "rb") as f:
-                        cache_insts_path = cache.put(f.read(), "insts.bin")
+                    cache_xclbin_path = cached_artifacts["xclbin_path"]
+                    cache_insts_path = cached_artifacts["insts_path"]
                 with open(so_path, "rb") as f:
                     cache_path = cache.put(f.read(), filename, binary=True)
 

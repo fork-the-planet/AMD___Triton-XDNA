@@ -8,13 +8,13 @@ index 392436308b..482cd04b81 100644
  // keep specs simple
 -int constexpr maxTensorNumElements = 1048576;
 +//
-+// XDNA/AIE backend: a block tensor does not become a GPU register tile here.
-+// triton-shared lowers whole-tile loads + tl.dot to a single linalg.matmul
-+// that the MLIR-AIR transform pipeline tiles across L3/L2/L1 on-device, so the
-+// register-pressure rationale above does not apply. Raised from 2**20 to 2**22
-+// so single-block NPU matmuls can express full K (e.g. 256 x 8192) without
-+// chunking the reduction on the host. Keep in sync with the Python-side guard
-+// (TRITON_MAX_TENSOR_NUMEL) lifted in amd_triton_npu/backend/driver.py.
++// NOTE: This increases Triton's block-tensor element limit globally (all backends).
++// It is needed for the XDNA/AIE backend where block tensors don't become GPU
++// register tiles: tl.load/tl.dot lowers to linalg.matmul and is tiled on-device,
++// so the original register-pressure rationale does not apply.
++// Raised from 2**20 to 2**22 so single-block NPU matmuls can express full K
++// (e.g. 256 x 8192) without chunking the reduction on the host. Keep in sync
++// with the Python-side guard (TRITON_MAX_TENSOR_NUMEL) lifted in amd_triton_npu/backend/driver.py.
 +int constexpr maxTensorNumElements = 4194304;
  
  LogicalResult verifyTensorSize(Operation *op);

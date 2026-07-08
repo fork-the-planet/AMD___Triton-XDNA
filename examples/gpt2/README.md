@@ -19,9 +19,16 @@ every size with no changes.
 
 ## Setup
 
+**Prerequisite: a ROCm torch device is required for all backends except
+`reference`.** Every mode — including `--backend npu` — runs the LM head on
+the iGPU (see the routing table below), so a working ROCm/Triton GPU with a
+ROCm build of PyTorch must be installed.
+
 ```bash
 # Prerequisites
 pip install transformers
+# ROCm PyTorch (adjust the ROCm version to match your install)
+pip install torch --index-url https://download.pytorch.org/whl/rocm6.2
 
 # Environment setup (required for NPU/hetero modes)
 source /opt/xilinx/xrt/setup.sh
@@ -61,7 +68,7 @@ Four backends route operators across devices differently:
 | Backend | Description |
 |---------|-------------|
 | `gpu` | All ops on iGPU via ROCm/Triton |
-| `npu` | All ops on NPU via MLIR-AIR/AIE |
+| `npu` | All ops on NPU via MLIR-AIR/AIE, except the LM head (GPU) |
 | `hetero` | Attention on GPU, LN/MLP/add on NPU |
 | `hetero-fast` | Same as hetero for prefill; all-GPU decode |
 

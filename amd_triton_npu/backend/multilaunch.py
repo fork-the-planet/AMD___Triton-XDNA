@@ -29,6 +29,8 @@ from .driver import (
     _ttshared_to_air,
     _aircc_compile,
     _get_output_format,
+    _get_cached_aircc_artifacts,
+    _put_aircc_artifacts,
     detect_npu_version,
 )
 
@@ -98,8 +100,7 @@ class MultiLaunchBuilder:
         # consistency when an index is reused for a hand-off).
         self._combined_types = {}
 
-    def add_op(self, asm_src, grid, arg_map, transform_script=None,
-               actual_sizes=None):
+    def add_op(self, asm_src, grid, arg_map, transform_script=None, actual_sizes=None):
         """Lower one Triton-Shared MLIR op to AIR and register it in the chain.
 
         Args:
@@ -166,9 +167,7 @@ class MultiLaunchBuilder:
                 privates.add(p.strip())
 
         types = self.combined_arg_types()
-        sig = ",\n    ".join(
-            f"%arg{i}: {ty}" for i, ty in enumerate(types)
-        )
+        sig = ",\n    ".join(f"%arg{i}: {ty}" for i, ty in enumerate(types))
         privates_str = "\n  ".join(sorted(privates))
         bodies_str = "\n".join(bodies)
         combined = "\n".join(maps_all) + f"""
@@ -212,17 +211,12 @@ module {{
 
         key = self.cache_key(output_format, npu_version, combined)
         cache = get_cache_manager(key)
-        if output_format == "elf":
-            cached_elf = cache.get_file("aie.elf")
-            cached_kname = cache.get_file("elf_kernel_name.txt")
-            if cached_elf is not None and cached_kname is not None:
-                with open(cached_kname) as f:
-                    return cached_elf, f.read()
-        else:
-            cached_xclbin = cache.get_file("aie.xclbin")
-            cached_insts = cache.get_file("insts.bin")
-            if cached_xclbin is not None and cached_insts is not None:
-                return cached_xclbin, cached_insts
+        cached = _get_cached_aircc_artifacts(cache, output_format)
+        if cached is not None:
+            if output_format == "elf":
+                with open(cached["elf_kernel_name_path"]) as f:
+                    return cached["elf_path"], f.read()
+            return cached["xclbin_path"], cached["insts_path"]
 
         air_proj = self.air_project_path
         os.makedirs(air_proj, exist_ok=True)
@@ -230,20 +224,12 @@ module {{
         with open(air_mlir_path, "w") as f:
             f.write(combined)
 
-        artifacts = _aircc_compile(
-            air_mlir_path, output_format, npu_version, air_proj
-        )
+        artifacts = _aircc_compile(air_mlir_path, output_format, npu_version, air_proj)
         # Cache the format-specific artifacts and return the cached paths.
+        cached = _put_aircc_artifacts(cache, artifacts, output_format)
         if output_format == "elf":
-            with open(artifacts["elf_path"], "rb") as f:
-                cached_elf = cache.put(f.read(), "aie.elf", binary=True)
-            cache.put(artifacts["elf_kernel_name"].encode(), "elf_kernel_name.txt")
-            return cached_elf, artifacts["elf_kernel_name"]
-        with open(artifacts["xclbin_path"], "rb") as f:
-            cached_xclbin = cache.put(f.read(), "aie.xclbin", binary=True)
-        with open(artifacts["insts_path"], "rb") as f:
-            cached_insts = cache.put(f.read(), "insts.bin")
-        return cached_xclbin, cached_insts
+            return cached["elf_path"], artifacts["elf_kernel_name"]
+        return cached["xclbin_path"], cached["insts_path"]
 
 
 class MultiLaunchRunner:
@@ -272,8 +258,7 @@ class MultiLaunchRunner:
         self.kernel = xrt.ext.kernel(self.context, kernel_name)
         self._bos = {}  # bo_key -> list[xrt.ext.bo]
 
-    def run(self, inputs, *, bo_key, static_indices=(), intermediate_indices=(),
-            output_indices=None):
+    def run(self, inputs, *, bo_key, static_indices=(), intermediate_indices=(), output_indices=None):
         """Execute the chain.
 
         Args:
@@ -316,7 +301,7 @@ class MultiLaunchRunner:
             if i in inter_set and first_call:
                 # still allocate-clean on first call but no meaningful host data;
                 # write zeros so device memory is defined.
-                pass
+                a.fill(0)
             buf = a.view(np.int16) if a.dtype == bfloat16 else a
             mv = bos[i].map()
             src = np.frombuffer(buf, dtype=np.uint8)
@@ -403,8 +388,7 @@ class NPUChain:
         self._elf_path = None
         self._kernel_name = None
 
-    def add(self, kernel, grid, arg_map, *, args, constexprs=None,
-            transform_script=None, actual_sizes=None):
+    def add(self, kernel, grid, arg_map, *, args, constexprs=None, transform_script=None, actual_sizes=None):
         """Register one Triton kernel as the next launch in the chain.
 
         Args:
@@ -452,14 +436,18 @@ class NPUChain:
         b = MultiLaunchBuilder(self.name, air_project_path=self.air_project_path)
         for kernel, grid, arg_map, tscript, args, constexprs, actual_sizes in self._specs:
             asm_src = self._capture_ttshared(kernel, grid, args, constexprs)
-            b.add_op(asm_src, grid, arg_map, transform_script=tscript,
-                     actual_sizes=actual_sizes)
+            b.add_op(
+                asm_src,
+                grid,
+                arg_map,
+                transform_script=tscript,
+                actual_sizes=actual_sizes,
+            )
         self._builder = b
         self._elf_path, self._kernel_name = b.compile()
         self._runner = MultiLaunchRunner(self._elf_path, self._kernel_name)
 
-    def run(self, inputs, *, bo_key=None, static_indices=(),
-            intermediate_indices=(), output_indices=None):
+    def run(self, inputs, *, bo_key=None, static_indices=(), intermediate_indices=(), output_indices=None):
         """Build (first call) + dispatch the chain. Returns {idx: ndarray}."""
         if self._runner is None:
             self._build()

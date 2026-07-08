@@ -157,9 +157,9 @@ def print_generation(logits, tokenizer, input_ids, prompt):
     last_logits = logits[0, -1]  # (vocab_size,)
     next_token_id = torch.argmax(last_logits).item()
     next_token = tokenizer.decode([next_token_id])
-    print(f"\n  Prompt: \"{prompt}\"")
-    print(f"  Predicted next token: \"{next_token}\"")
-    print(f"  Full: \"{prompt}{next_token}\"")
+    print(f'\n  Prompt: "{prompt}"')
+    print(f'  Predicted next token: "{next_token}"')
+    print(f'  Full: "{prompt}{next_token}"')
 
 
 def run_generation(hf_model, tokenizer, input_ids, args):
@@ -183,7 +183,8 @@ def run_generation(hf_model, tokenizer, input_ids, args):
     # Triton generation
     logger.info(f"Generating {args.max_tokens} tokens (backend={args.backend})...")
     generated_ids, timing = model.generate(
-        input_ids, max_new_tokens=args.max_tokens,
+        input_ids, 
+        max_new_tokens=args.max_tokens,
         progress_callback=make_progress_bar(),
     )
     sys.stderr.write("\n")
@@ -233,9 +234,11 @@ def run_generation(hf_model, tokenizer, input_ids, args):
     print(f"\n--- HuggingFace Reference Generation ---")
     with torch.no_grad():
         hf_output = hf_model.generate(
-            input_ids, max_new_tokens=args.max_tokens, do_sample=False,
+            input_ids, 
+            max_new_tokens=args.max_tokens, 
+            do_sample=False,
         )
-    hf_text = tokenizer.decode(hf_output[0][input_ids.shape[1]:])
+    hf_text = tokenizer.decode(hf_output[0][input_ids.shape[1] :])
     print(f"  {args.prompt}{hf_text}")
 
 
@@ -346,33 +349,44 @@ def print_profile(timer, label="Op Timing Profile"):
 def main():
     parser = argparse.ArgumentParser(description="GPT-2 Triton Inference")
     parser.add_argument(
-        "--model", type=str, default="gpt2",
+        "--model", 
+        type=str, 
+        default="gpt2",
         choices=["gpt2", "gpt2-medium", "gpt2-large", "gpt2-xl"],
         help="GPT-2 variant: gpt2 (124M), gpt2-medium (355M), gpt2-large (774M), gpt2-xl (1.5B)",
     )
     parser.add_argument(
-        "--backend", type=str, default="gpu",
+        "--backend", 
+        type=str, 
+        default="gpu",
         choices=["gpu", "npu", "hetero", "hetero-fast", "reference"],
         help="Backend: gpu, npu, hetero (consistent NPU/GPU split), hetero-fast (GPU-only decode), reference (HF only)",
     )
     parser.add_argument(
-        "--prompt", type=str, default="The quick brown fox",
+        "--prompt", 
+        type=str, 
+        default="The quick brown fox",
         help="Input prompt for inference",
     )
     parser.add_argument(
-        "--max-tokens", type=int, default=0,
+        "--max-tokens", 
+        type=int, 
+        default=0,
         help="Number of tokens to generate (0 = single forward pass only)",
     )
     parser.add_argument(
-        "--interactive", action="store_true",
+        "--interactive", 
+        action="store_true",
         help="Interactive mode: type prompts, get completions in a loop",
     )
     parser.add_argument(
-        "--profile", action="store_true",
+        "--profile", 
+        action="store_true",
         help="Enable per-op timing profiling for the forward pass",
     )
     parser.add_argument(
-        "--verbose", action="store_true",
+        "--verbose", 
+        action="store_true",
         help="Enable verbose logging",
     )
     args = parser.parse_args()
