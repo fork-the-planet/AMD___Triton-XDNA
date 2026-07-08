@@ -84,9 +84,11 @@ def run_triton_model(state_dict, input_ids, backend, profile=False, config=None)
     # handles NPU switching inside each kernel wrapper.
     if backend == "npu":
         import benchmark
+
         benchmark.select_npu_backend()
     elif backend in ("gpu", "hetero", "hetero-fast"):
         import benchmark
+          
         benchmark.select_gpu_backend()
 
     model = GPT2Model(state_dict, backend=backend, config=config)
@@ -100,7 +102,9 @@ def run_triton_model(state_dict, input_ids, backend, profile=False, config=None)
     logger.info(f"Forward pass completed in {t1 - t0:.3f}s")
 
     if profile:
-        print_profile(model.timer, label=f"Op Timing Profile (prefill, backend={backend})")
+        print_profile(
+            model.timer, label=f"Op Timing Profile (prefill, backend={backend})"
+        )
 
     return logits
 
@@ -171,19 +175,23 @@ def run_generation(hf_model, tokenizer, input_ids, args):
     # handles NPU switching inside each kernel wrapper.
     if args.backend == "npu":
         import benchmark
+
         benchmark.select_npu_backend()
     elif args.backend in ("gpu", "hetero", "hetero-fast"):
         import benchmark
+
         benchmark.select_gpu_backend()
 
     state_dict = hf_model.state_dict()
-    model = GPT2Model(state_dict, backend=args.backend, config=getattr(args, "config", None))
+    model = GPT2Model(
+        state_dict, backend=args.backend, config=getattr(args, "config", None)
+    )
     model.timer.enabled = getattr(args, "profile", False)
 
     # Triton generation
     logger.info(f"Generating {args.max_tokens} tokens (backend={args.backend})...")
     generated_ids, timing = model.generate(
-        input_ids, 
+        input_ids,
         max_new_tokens=args.max_tokens,
         progress_callback=make_progress_bar(),
     )
@@ -228,14 +236,17 @@ def run_generation(hf_model, tokenizer, input_ids, args):
     # Op-level profiling
     if getattr(args, "profile", False):
         steps = 1 + num_decode  # prefill + decode
-        print_profile(model.timer, label=f"Op Timing Profile ({steps} steps, backend={args.backend})")
+        print_profile(
+            model.timer,
+            label=f"Op Timing Profile ({steps} steps, backend={args.backend})",
+        )
 
     # HuggingFace reference generation for comparison
     print(f"\n--- HuggingFace Reference Generation ---")
     with torch.no_grad():
         hf_output = hf_model.generate(
-            input_ids, 
-            max_new_tokens=args.max_tokens, 
+            input_ids,
+            max_new_tokens=args.max_tokens,
             do_sample=False,
         )
     hf_text = tokenizer.decode(hf_output[0][input_ids.shape[1] :])
@@ -252,9 +263,11 @@ def run_interactive(hf_model, tokenizer, args):
     # Select backend driver once
     if backend == "npu":
         import benchmark
+
         benchmark.select_npu_backend()
     elif backend in ("gpu", "hetero", "hetero-fast"):
         import benchmark
+
         benchmark.select_gpu_backend()
 
     state_dict = hf_model.state_dict()
@@ -318,12 +331,14 @@ def run_interactive(hf_model, tokenizer, args):
 
 def make_progress_bar(width=30):
     """Return a callback that renders an in-place progress bar to stderr."""
+
     def callback(done, total):
         frac = done / total if total > 0 else 1.0
         filled = int(width * frac)
         bar = "#" * filled + "-" * (width - filled)
         sys.stderr.write(f"\r  [{bar}] {done}/{total} tokens")
         sys.stderr.flush()
+
     return callback
 
 
@@ -336,7 +351,9 @@ def print_profile(timer, label="Op Timing Profile"):
     print(f"\n{'=' * 65}")
     print(f"  {label}")
     print(f"{'=' * 65}")
-    print(f"  {'Op':<14} {'Total (ms)':>10}   {'Count':>5}   {'Avg (ms)':>8}   {'%':>6}")
+    print(
+        f"  {'Op':<14} {'Total (ms)':>10}   {'Count':>5}   {'Avg (ms)':>8}   {'%':>6}"
+    )
     print(f"  {'-'*14} {'-'*10}   {'-'*5}   {'-'*8}   {'-'*6}")
     for op, op_total, count, avg in rows:
         pct = (op_total / total * 100) if total > 0 else 0
@@ -349,43 +366,43 @@ def print_profile(timer, label="Op Timing Profile"):
 def main():
     parser = argparse.ArgumentParser(description="GPT-2 Triton Inference")
     parser.add_argument(
-        "--model", 
-        type=str, 
+        "--model",
+        type=str,
         default="gpt2",
         choices=["gpt2", "gpt2-medium", "gpt2-large", "gpt2-xl"],
         help="GPT-2 variant: gpt2 (124M), gpt2-medium (355M), gpt2-large (774M), gpt2-xl (1.5B)",
     )
     parser.add_argument(
-        "--backend", 
-        type=str, 
+        "--backend",
+        type=str,
         default="gpu",
         choices=["gpu", "npu", "hetero", "hetero-fast", "reference"],
         help="Backend: gpu, npu, hetero (consistent NPU/GPU split), hetero-fast (GPU-only decode), reference (HF only)",
     )
     parser.add_argument(
-        "--prompt", 
-        type=str, 
+        "--prompt",
+        type=str,
         default="The quick brown fox",
         help="Input prompt for inference",
     )
     parser.add_argument(
-        "--max-tokens", 
-        type=int, 
+        "--max-tokens",
+        type=int,
         default=0,
         help="Number of tokens to generate (0 = single forward pass only)",
     )
     parser.add_argument(
-        "--interactive", 
+        "--interactive",
         action="store_true",
         help="Interactive mode: type prompts, get completions in a loop",
     )
     parser.add_argument(
-        "--profile", 
+        "--profile",
         action="store_true",
         help="Enable per-op timing profiling for the forward pass",
     )
     parser.add_argument(
-        "--verbose", 
+        "--verbose",
         action="store_true",
         help="Enable verbose logging",
     )
@@ -398,6 +415,7 @@ def main():
 
     # Resolve variant config from --model
     from model import GPT2_CONFIGS
+
     args.config = GPT2_CONFIGS[args.model]
 
     # Load HuggingFace model
@@ -414,7 +432,7 @@ def main():
     inputs = tokenizer(args.prompt, return_tensors="pt")
     input_ids = inputs["input_ids"]
     seq_len = input_ids.shape[1]
-    print(f"\nPrompt: \"{args.prompt}\" ({seq_len} tokens)")
+    print(f'\nPrompt: \"{args.prompt}\" ({seq_len} tokens)')
 
     if args.max_tokens > 0 and args.backend != "reference":
         # --- Generation mode ---
@@ -430,7 +448,13 @@ def main():
             return
 
         state_dict = hf_model.state_dict()
-        triton_logits = run_triton_model(state_dict, input_ids, args.backend, profile=args.profile, config=args.config)
+        triton_logits = run_triton_model(
+            state_dict,
+            input_ids,
+            args.backend,
+            profile=args.profile,
+            config=args.config,
+        )
 
         print(f"\n--- Triton ({args.backend.upper()}) ---")
         print_generation(triton_logits, tokenizer, input_ids, args.prompt)

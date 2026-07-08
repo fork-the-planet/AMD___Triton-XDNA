@@ -19,7 +19,9 @@ import triton.language as tl
 # ---------------------------------------------------------------------------
 @triton.jit
 def add_kernel_gpu(
-    A, B, C,
+    A,
+    B,
+    C,
     n_elements: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
@@ -37,7 +39,9 @@ def add_kernel_gpu(
 # ---------------------------------------------------------------------------
 @triton.jit
 def add_kernel_npu(
-    A, B, C,
+    A,
+    B,
+    C,
     n_elements: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
@@ -53,6 +57,7 @@ def add_kernel_npu(
 # Wrapper: triton_add
 # ---------------------------------------------------------------------------
 from .backend_utils import CachedNPUKernel
+
 _add_npu_cached = CachedNPUKernel()
 
 
@@ -112,7 +117,9 @@ def triton_add(a, b, backend="gpu", transform_script=None):
             os.environ["AIR_TRANSFORM_TILING_SCRIPT"] = transform_script
 
         grid = (n_padded // BLOCK_SIZE,)
-        _add_npu_cached(add_kernel_npu, grid, a_npu, b_npu, output, n_padded, BLOCK_SIZE=BLOCK_SIZE)
+        _add_npu_cached(
+            add_kernel_npu, grid, a_npu, b_npu, output, n_padded, BLOCK_SIZE=BLOCK_SIZE
+        )
 
         if old_script is not None:
             os.environ["AIR_TRANSFORM_TILING_SCRIPT"] = old_script

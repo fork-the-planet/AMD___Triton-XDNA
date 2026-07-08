@@ -1507,7 +1507,7 @@ def _aircc_compile(air_mlir_path, output_format, npu_version, air_proj_path):
             mlir_aie_bin = str(Path(mlir_aie.__path__[0]) / "bin")
         except ImportError:
             mlir_aie_bin = str(
-                Path(aircc.__file__).resolve().parent.parent.parent / "mlir_aie" / "bin" 
+                Path(aircc.__file__).resolve().parent.parent.parent / "mlir_aie" / "bin"
             )
 
         if os.path.isdir(mlir_aie_bin) and mlir_aie_bin not in os.environ.get(
@@ -1841,9 +1841,7 @@ def compile_module(
                 # Cache format-specific artifacts first, then the .so last.
                 # This avoids partial cache entries if aircc or kernel name
                 # extraction fails -- the .so is the gate for cache hits.
-                cached_artifacts = _put_aircc_artifacts(
-                    cache, artifacts, output_format
-                )
+                cached_artifacts = _put_aircc_artifacts(cache, artifacts, output_format)
                 if output_format == "elf":
                     cache_elf_path = cached_artifacts["elf_path"]
                     cache_elf_kernel_path = cached_artifacts["elf_kernel_name_path"]

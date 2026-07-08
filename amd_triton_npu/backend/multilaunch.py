@@ -258,7 +258,15 @@ class MultiLaunchRunner:
         self.kernel = xrt.ext.kernel(self.context, kernel_name)
         self._bos = {}  # bo_key -> list[xrt.ext.bo]
 
-    def run(self, inputs, *, bo_key, static_indices=(), intermediate_indices=(), output_indices=None):
+    def run(
+        self,
+        inputs,
+        *,
+        bo_key,
+        static_indices=(),
+        intermediate_indices=(),
+        output_indices=None,
+    ):
         """Execute the chain.
 
         Args:
@@ -388,7 +396,17 @@ class NPUChain:
         self._elf_path = None
         self._kernel_name = None
 
-    def add(self, kernel, grid, arg_map, *, args, constexprs=None, transform_script=None, actual_sizes=None):
+    def add(
+        self,
+        kernel,
+        grid,
+        arg_map,
+        *,
+        args,
+        constexprs=None,
+        transform_script=None,
+        actual_sizes=None,
+    ):
         """Register one Triton kernel as the next launch in the chain.
 
         Args:
@@ -408,8 +426,15 @@ class NPUChain:
         while len(g) < 3:
             g = g + (1,)
         self._specs.append(
-            (kernel, g, dict(arg_map), transform_script,
-             tuple(args), dict(constexprs or {}), actual_sizes)
+            (
+                kernel,
+                g,
+                dict(arg_map),
+                transform_script,
+                tuple(args),
+                dict(constexprs or {}),
+                actual_sizes,
+            )
         )
         return self
 
@@ -434,7 +459,15 @@ class NPUChain:
 
     def _build(self):
         b = MultiLaunchBuilder(self.name, air_project_path=self.air_project_path)
-        for kernel, grid, arg_map, tscript, args, constexprs, actual_sizes in self._specs:
+        for (
+            kernel,
+            grid,
+            arg_map,
+            tscript,
+            args,
+            constexprs,
+            actual_sizes,
+        ) in self._specs:
             asm_src = self._capture_ttshared(kernel, grid, args, constexprs)
             b.add_op(
                 asm_src,
@@ -447,7 +480,15 @@ class NPUChain:
         self._elf_path, self._kernel_name = b.compile()
         self._runner = MultiLaunchRunner(self._elf_path, self._kernel_name)
 
-    def run(self, inputs, *, bo_key=None, static_indices=(), intermediate_indices=(), output_indices=None):
+    def run(
+        self,
+        inputs,
+        *,
+        bo_key=None,
+        static_indices=(),
+        intermediate_indices=(),
+        output_indices=None,
+    ):
         """Build (first call) + dispatch the chain. Returns {idx: ndarray}."""
         if self._runner is None:
             self._build()
