@@ -36,12 +36,20 @@ import triton.language as tl
 )
 @triton.jit
 def matmul_kernel_gpu(
-    A, B, C,
-    M, N, K,
-    stride_am, stride_ak,
-    stride_bk, stride_bn,
-    stride_cm, stride_cn,
-    BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr,
+    A,
+    B,
+    C,
+    M,
+    N,
+    K,
+    stride_am,
+    stride_ak,
+    stride_bk,
+    stride_bn,
+    stride_cm,
+    stride_cn,
+    BLOCK_SIZE_M: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
     GROUP_SIZE_M: tl.constexpr,
 ):
@@ -87,12 +95,20 @@ def matmul_kernel_gpu(
 # ---------------------------------------------------------------------------
 @triton.jit
 def matmul_kernel_npu(
-    A, B, C,
-    M: tl.constexpr, N: tl.constexpr, K: tl.constexpr,
-    stride_am: tl.constexpr, stride_ak: tl.constexpr,
-    stride_bk: tl.constexpr, stride_bn: tl.constexpr,
-    stride_cm: tl.constexpr, stride_cn: tl.constexpr,
-    BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr,
+    A,
+    B,
+    C,
+    M: tl.constexpr,
+    N: tl.constexpr,
+    K: tl.constexpr,
+    stride_am: tl.constexpr,
+    stride_ak: tl.constexpr,
+    stride_bk: tl.constexpr,
+    stride_bn: tl.constexpr,
+    stride_cm: tl.constexpr,
+    stride_cn: tl.constexpr,
+    BLOCK_SIZE_M: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
 ):
     pid_m = tl.program_id(0)
@@ -172,14 +188,24 @@ def triton_linear(x, weight, bias=None, backend="gpu", transform_script=None):
 
         # Lambda grid: autotuner selects block sizes, grid computed from them
         def grid(META):
-            return (triton.cdiv(M_orig, META['BLOCK_SIZE_M']) * triton.cdiv(N, META['BLOCK_SIZE_N']),)
+            return (
+                triton.cdiv(M_orig, META["BLOCK_SIZE_M"])
+                * triton.cdiv(N, META["BLOCK_SIZE_N"]),
+            )
 
         matmul_kernel_gpu[grid](
-            x_bf16, w_bf16, c,
-            M_orig, N, K,
-            x_bf16.stride(0), x_bf16.stride(1),
-            w_bf16.stride(0), w_bf16.stride(1),
-            c.stride(0), c.stride(1),
+            x_bf16,
+            w_bf16,
+            c,
+            M_orig,
+            N,
+            K,
+            x_bf16.stride(0),
+            x_bf16.stride(1),
+            w_bf16.stride(0),
+            w_bf16.stride(1),
+            c.stride(0),
+            c.stride(1),
         )
     else:
         # NPU path: pad to block-aligned dims, single launch (full K on-device).
@@ -219,13 +245,23 @@ def triton_linear(x, weight, bias=None, backend="gpu", transform_script=None):
         grid = (M_padded // BLOCK_M, N_padded // BLOCK_N)
         c = torch.empty((M_padded, N_padded), dtype=torch.float32)
         _matmul_npu_cached(
-            matmul_kernel_npu, grid,
-            x_bf16, w_t, c,
-            M_padded, N_padded, K_padded,
-            x_bf16.stride(0), x_bf16.stride(1),
-            w_t.stride(0), w_t.stride(1),
-            c.stride(0), c.stride(1),
-            BLOCK_SIZE_M=BLOCK_M, BLOCK_SIZE_N=BLOCK_N, BLOCK_SIZE_K=K_padded,
+            matmul_kernel_npu,
+            grid,
+            x_bf16,
+            w_t,
+            c,
+            M_padded,
+            N_padded,
+            K_padded,
+            x_bf16.stride(0),
+            x_bf16.stride(1),
+            w_t.stride(0),
+            w_t.stride(1),
+            c.stride(0),
+            c.stride(1),
+            BLOCK_SIZE_M=BLOCK_M,
+            BLOCK_SIZE_N=BLOCK_N,
+            BLOCK_SIZE_K=K_padded,
         )
 
         # Restore env
@@ -266,12 +302,23 @@ def triton_linear(x, weight, bias=None, backend="gpu", transform_script=None):
 )
 @triton.jit
 def bmm_kernel_gpu(
-    A, B, C,
-    M, N, K,
-    stride_ab, stride_am, stride_ak,
-    stride_bb, stride_bk, stride_bn,
-    stride_cb, stride_cm, stride_cn,
-    BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr,
+    A,
+    B,
+    C,
+    M,
+    N,
+    K,
+    stride_ab,
+    stride_am,
+    stride_ak,
+    stride_bb,
+    stride_bk,
+    stride_bn,
+    stride_cb,
+    stride_cm,
+    stride_cn,
+    BLOCK_SIZE_M: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
     GROUP_SIZE_M: tl.constexpr,
 ):
@@ -334,7 +381,9 @@ def triton_bmm(a, b):
     Returns:
         (B, M, N) tensor in bf16
     """
-    assert a.ndim == 3 and b.ndim == 3, f"Expected 3D tensors, got {a.ndim}D and {b.ndim}D"
+    assert (
+        a.ndim == 3 and b.ndim == 3
+    ), f"Expected 3D tensors, got {a.ndim}D and {b.ndim}D"
     batch, M, K = a.shape
     _, K2, N = b.shape
     assert K == K2, f"Inner dims mismatch: {K} vs {K2}"
@@ -351,11 +400,21 @@ def triton_bmm(a, b):
         )
 
     bmm_kernel_gpu[grid](
-        a_bf16, b_bf16, c,
-        M, N, K,
-        a_bf16.stride(0), a_bf16.stride(1), a_bf16.stride(2),
-        b_bf16.stride(0), b_bf16.stride(1), b_bf16.stride(2),
-        c.stride(0), c.stride(1), c.stride(2),
+        a_bf16,
+        b_bf16,
+        c,
+        M,
+        N,
+        K,
+        a_bf16.stride(0),
+        a_bf16.stride(1),
+        a_bf16.stride(2),
+        b_bf16.stride(0),
+        b_bf16.stride(1),
+        b_bf16.stride(2),
+        c.stride(0),
+        c.stride(1),
+        c.stride(2),
     )
 
     return c

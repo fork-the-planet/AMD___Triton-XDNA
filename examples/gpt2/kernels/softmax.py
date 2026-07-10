@@ -32,7 +32,9 @@ def softmax_kernel_gpu(
     mask = col_offsets < n_cols
 
     # Load row
-    row = tl.load(input_ptr + row_start + col_offsets, mask=mask, other=float("-inf")).to(tl.float32)
+    row = tl.load(
+        input_ptr + row_start + col_offsets, mask=mask, other=float("-inf")
+    ).to(tl.float32)
 
     # Numerically stable softmax
     row_max = tl.max(row, axis=0)
@@ -169,7 +171,9 @@ def triton_softmax(x, causal_mask=None, backend="gpu", transform_script=None):
         # Process in chunks of BLOCK_SIZE rows (1 kernel call each)
         output_chunks = []
         for row_start in range(0, n_rows_padded, BLOCK_SIZE):
-            chunk = x_2d[row_start:row_start + BLOCK_SIZE].to(torch.bfloat16).contiguous()
+            chunk = (
+                x_2d[row_start : row_start + BLOCK_SIZE].to(torch.bfloat16).contiguous()
+            )
             out_chunk = torch.empty_like(chunk)
             _softmax_npu_cached(
                 softmax_kernel_npu,

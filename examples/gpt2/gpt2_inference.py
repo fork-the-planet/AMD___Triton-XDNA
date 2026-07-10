@@ -88,6 +88,7 @@ def run_triton_model(state_dict, input_ids, backend, profile=False, config=None)
         benchmark.select_npu_backend()
     elif backend in ("gpu", "hetero", "hetero-fast"):
         import benchmark
+
         benchmark.select_gpu_backend()
 
     model = GPT2Model(state_dict, backend=backend, config=config)
@@ -431,7 +432,7 @@ def main():
     inputs = tokenizer(args.prompt, return_tensors="pt")
     input_ids = inputs["input_ids"]
     seq_len = input_ids.shape[1]
-    print(f'\nPrompt: \"{args.prompt}\" ({seq_len} tokens)')
+    print(f'\nPrompt: "{args.prompt}" ({seq_len} tokens)')
 
     if args.max_tokens > 0 and args.backend != "reference":
         # --- Generation mode ---

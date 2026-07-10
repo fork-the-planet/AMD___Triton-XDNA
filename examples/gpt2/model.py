@@ -33,7 +33,15 @@ import torch
 import math
 import numpy as np
 
-from kernels import triton_linear, triton_bmm, triton_softmax, triton_layernorm, triton_gelu, triton_add, triton_fused_attention
+from kernels import (
+    triton_linear,
+    triton_bmm,
+    triton_softmax,
+    triton_layernorm,
+    triton_gelu,
+    triton_add,
+    triton_fused_attention,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -80,10 +88,20 @@ class OpTimer:
 # context length, and head_dim (64) — only depth/width differ — so the same
 # kernels and transform scripts serve every size.
 GPT2_CONFIGS = {
-    "gpt2":        {"hf_name": "gpt2",        "n_layer": 12, "n_head": 12, "n_embd": 768},
-    "gpt2-medium": {"hf_name": "gpt2-medium", "n_layer": 24, "n_head": 16, "n_embd": 1024},
-    "gpt2-large":  {"hf_name": "gpt2-large",  "n_layer": 36, "n_head": 20, "n_embd": 1280},
-    "gpt2-xl":     {"hf_name": "gpt2-xl",     "n_layer": 48, "n_head": 25, "n_embd": 1600},
+    "gpt2": {"hf_name": "gpt2", "n_layer": 12, "n_head": 12, "n_embd": 768},
+    "gpt2-medium": {
+        "hf_name": "gpt2-medium",
+        "n_layer": 24,
+        "n_head": 16,
+        "n_embd": 1024,
+    },
+    "gpt2-large": {
+        "hf_name": "gpt2-large",
+        "n_layer": 36,
+        "n_head": 20,
+        "n_embd": 1280,
+    },
+    "gpt2-xl": {"hf_name": "gpt2-xl", "n_layer": 48, "n_head": 25, "n_embd": 1600},
 }
 
 # Shared across all GPT-2 variants
@@ -180,13 +198,23 @@ class _FusedMLP:
         import triton.language as tl
 
         @triton.jit
-        def _mm_kernel(A, B, C,
-                       M: tl.constexpr, N: tl.constexpr, K: tl.constexpr,
-                       sam: tl.constexpr, sak: tl.constexpr,
-                       sbk: tl.constexpr, sbn: tl.constexpr,
-                       scm: tl.constexpr, scn: tl.constexpr,
-                       BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr,
-                       BLOCK_SIZE_K: tl.constexpr):
+        def _mm_kernel(
+            A,
+            B,
+            C,
+            M: tl.constexpr,
+            N: tl.constexpr,
+            K: tl.constexpr,
+            sam: tl.constexpr,
+            sak: tl.constexpr,
+            sbk: tl.constexpr,
+            sbn: tl.constexpr,
+            scm: tl.constexpr,
+            scn: tl.constexpr,
+            BLOCK_SIZE_M: tl.constexpr,
+            BLOCK_SIZE_N: tl.constexpr,
+            BLOCK_SIZE_K: tl.constexpr,
+        ):
             pid_m = tl.program_id(0)
             pid_n = tl.program_id(1)
             offs_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
@@ -270,25 +298,47 @@ class _FusedMLP:
         tOut = torch.zeros(M_pad * D, dtype=torch.float32)
 
         chain = NPUChain("gpt2_mlp")
-        chain.add(self._mm, grid=(M_pad // BM, HID_pad // BN),
-                  arg_map={0: 0, 1: 1, 2: 2},
-                  args=(tAf, tB0, tC0, M_pad, HID_pad, K0_pad,
-                        K0_pad, 1, HID_pad, 1, HID_pad, 1),
-                  constexprs={"BLOCK_SIZE_M": BM, "BLOCK_SIZE_N": BN,
-                              "BLOCK_SIZE_K": K0_pad},
-                  transform_script=self.matmul_script)
-        chain.add(self._gelu, grid=((M_pad * HID_pad) // 1024,),
-                  arg_map={0: 2, 1: 3},
-                  args=(tXg, tG, M_pad * HID_pad),
-                  constexprs={"BLOCK_SIZE": 1024},
-                  transform_script=self.gelu_script)
-        chain.add(self._mm, grid=(M_pad // BM, D // BN),
-                  arg_map={0: 3, 1: 4, 2: 5},
-                  args=(tGm, tB2, tC2, M_pad, D, HID_pad,
-                        HID_pad, 1, D, 1, D, 1),
-                  constexprs={"BLOCK_SIZE_M": BM, "BLOCK_SIZE_N": BN,
-                              "BLOCK_SIZE_K": HID_pad},
-                  transform_script=self.matmul_script)
+        chain.add(
+            self._mm,
+            grid=(M_pad // BM, HID_pad // BN),
+            arg_map={0: 0, 1: 1, 2: 2},
+            args=(
+                tAf,
+                tB0,
+                tC0,
+                M_pad,
+                HID_pad,
+                K0_pad,
+                K0_pad,
+                1,
+                HID_pad,
+                1,
+                HID_pad,
+                1,
+            ),
+            constexprs={"BLOCK_SIZE_M": BM, "BLOCK_SIZE_N": BN, "BLOCK_SIZE_K": K0_pad},
+            transform_script=self.matmul_script,
+        )
+        chain.add(
+            self._gelu,
+            grid=((M_pad * HID_pad) // 1024,),
+            arg_map={0: 2, 1: 3},
+            args=(tXg, tG, M_pad * HID_pad),
+            constexprs={"BLOCK_SIZE": 1024},
+            transform_script=self.gelu_script,
+        )
+        chain.add(
+            self._mm,
+            grid=(M_pad // BM, D // BN),
+            arg_map={0: 3, 1: 4, 2: 5},
+            args=(tGm, tB2, tC2, M_pad, D, HID_pad, HID_pad, 1, D, 1, D, 1),
+            constexprs={
+                "BLOCK_SIZE_M": BM,
+                "BLOCK_SIZE_N": BN,
+                "BLOCK_SIZE_K": HID_pad,
+            },
+            transform_script=self.matmul_script,
+        )
         # op3 add: out = C2 + residual (fold the post-MLP residual add into the
         # chain so it shares the one hw_context; mlp_proj bias is still applied
         # host-side on readback). C2 (combined idx 5) becomes an intermediate.
@@ -337,8 +387,7 @@ class _FusedMLP:
 
         D, H, K0_pad, HID_pad = self.D, self.H, self.K0_pad, self.HID_pad
         chain = self._get_chain()
-        B0, B2, b_proj_np = self._weights_for(
-            layer_idx, w_fc, b_fc, w_proj, b_proj)
+        B0, B2, b_proj_np = self._weights_for(layer_idx, w_fc, b_fc, w_proj, b_proj)
 
         orig_shape = x_norm.shape
         x2d = x_norm.reshape(-1, D).to(torch.float32).cpu().numpy()  # (M_real, D)
@@ -355,18 +404,26 @@ class _FusedMLP:
         # A_aug = [x | 1 | 0...]; reuse persistent buffers (only [:M_real] read
         # back, so stale rows beyond M_real are harmless).
         A_aug, C0, G, C2, R, OUT = (
-            self._A_aug, self._C0, self._G, self._C2, self._R, self._OUT)
+            self._A_aug,
+            self._C0,
+            self._G,
+            self._C2,
+            self._R,
+            self._OUT,
+        )
         A_aug[:M_real, :D] = x2d.astype(bfloat16)
         A_aug[:M_real, D] = bfloat16(1.0)
         R[:M_real, :D] = res2d
 
         # On-device: OUT = C2 + R (residual). Host: + b_proj broadcast over M,
         # giving x + (mlp_proj_out + b_proj) = x + mlp_out.
-        out = chain.run([A_aug, B0, C0, G, B2, C2, R, OUT],
-                        bo_key=f"gpt2_mlp_L{layer_idx}",
-                        static_indices={1, 4},
-                        intermediate_indices={2, 3, 5},
-                        output_indices={7})
+        out = chain.run(
+            [A_aug, B0, C0, G, B2, C2, R, OUT],
+            bo_key=f"gpt2_mlp_L{layer_idx}",
+            static_indices={1, 4},
+            intermediate_indices={2, 3, 5},
+            output_indices={7},
+        )
         res = out[7].astype(np.float32)[:M_real, :D] + b_proj_np  # host bias
         return torch.from_numpy(res.copy()).reshape(orig_shape)
 
@@ -423,26 +480,39 @@ class GPT2Model:
 
         # Resolve transform scripts relative to this file's directory
         self.script_dir = os.path.dirname(os.path.abspath(__file__))
-        self.matmul_script = os.path.join(self.script_dir, "transform_matmul_aie2p.mlir")
-        self.elem_script = os.path.join(self.script_dir, "transform_elementwise_aie2p.mlir")
+        self.matmul_script = os.path.join(
+            self.script_dir, "transform_matmul_aie2p.mlir"
+        )
+        self.elem_script = os.path.join(
+            self.script_dir, "transform_elementwise_aie2p.mlir"
+        )
         self.add_script = os.path.join(self.script_dir, "transform_add_aie2p.mlir")
-        self.add_f32_script = os.path.join(self.script_dir, "transform_add_f32_aie2p.mlir")
-        self.softmax_script = os.path.join(self.script_dir, "transform_softmax_aie2p.mlir")
-        self.layernorm_script = os.path.join(self.script_dir, "transform_layernorm_aie2p.mlir")
-        self.gelu_f32in_script = os.path.join(self.script_dir, "transform_gelu_f32in_aie2p.mlir")
+        self.add_f32_script = os.path.join(
+            self.script_dir, "transform_add_f32_aie2p.mlir"
+        )
+        self.softmax_script = os.path.join(
+            self.script_dir, "transform_softmax_aie2p.mlir"
+        )
+        self.layernorm_script = os.path.join(
+            self.script_dir, "transform_layernorm_aie2p.mlir"
+        )
+        self.gelu_f32in_script = os.path.join(
+            self.script_dir, "transform_gelu_f32in_aie2p.mlir"
+        )
 
         # Fuse mlp_fc->gelu->mlp_proj into one load_pdi ELF on NPU. On by default
         # whenever the MLP runs on NPU (hetero/hetero-fast or npu mode); the
         # unfused per-op path is ~10x slower, so it's only kept as an escape
         # hatch via AMD_TRITON_NPU_FUSED_MLP=0.
         self._fused_mlp = None
-        if (
-            (self._is_hetero or backend == "npu")
-            and os.getenv("AMD_TRITON_NPU_FUSED_MLP", "1") == "1"
-        ):
+        if (self._is_hetero or backend == "npu") and os.getenv(
+            "AMD_TRITON_NPU_FUSED_MLP", "1"
+        ) == "1":
             self._fused_mlp = _FusedMLP(
-                self.n_embd, self.mlp_dim,
-                self.matmul_script, self.gelu_f32in_script,
+                self.n_embd,
+                self.mlp_dim,
+                self.matmul_script,
+                self.gelu_f32in_script,
                 self.add_f32_script,
             )
 
@@ -463,18 +533,26 @@ class GPT2Model:
                 "ln1_weight": sd[f"{prefix}.ln_1.weight"].to(dtype),
                 "ln1_bias": sd[f"{prefix}.ln_1.bias"].to(dtype),
                 # QKV projection (combined)
-                "qkv_weight": sd[f"{prefix}.attn.c_attn.weight"].to(dtype),  # (768, 2304)
+                "qkv_weight": sd[f"{prefix}.attn.c_attn.weight"].to(
+                    dtype
+                ),  # (768, 2304)
                 "qkv_bias": sd[f"{prefix}.attn.c_attn.bias"].to(dtype),  # (2304,)
                 # Attention output projection
-                "attn_proj_weight": sd[f"{prefix}.attn.c_proj.weight"].to(dtype),  # (768, 768)
+                "attn_proj_weight": sd[f"{prefix}.attn.c_proj.weight"].to(
+                    dtype
+                ),  # (768, 768)
                 "attn_proj_bias": sd[f"{prefix}.attn.c_proj.bias"].to(dtype),  # (768,)
                 # Pre-MLP layernorm
                 "ln2_weight": sd[f"{prefix}.ln_2.weight"].to(dtype),
                 "ln2_bias": sd[f"{prefix}.ln_2.bias"].to(dtype),
                 # MLP
-                "mlp_fc_weight": sd[f"{prefix}.mlp.c_fc.weight"].to(dtype),  # (768, 3072)
+                "mlp_fc_weight": sd[f"{prefix}.mlp.c_fc.weight"].to(
+                    dtype
+                ),  # (768, 3072)
                 "mlp_fc_bias": sd[f"{prefix}.mlp.c_fc.bias"].to(dtype),  # (3072,)
-                "mlp_proj_weight": sd[f"{prefix}.mlp.c_proj.weight"].to(dtype),  # (3072, 768)
+                "mlp_proj_weight": sd[f"{prefix}.mlp.c_proj.weight"].to(
+                    dtype
+                ),  # (3072, 768)
                 "mlp_proj_bias": sd[f"{prefix}.mlp.c_proj.bias"].to(dtype),  # (768,)
             }
             self.layers.append(layer)
@@ -519,10 +597,16 @@ class GPT2Model:
         CPU copies of the NPU-routed weights.
         """
         # CPU copies of NPU-routed weights (must be created before moving to GPU)
-        npu_keys = {"ln1_weight", "ln1_bias",
-                    "ln2_weight", "ln2_bias",
-                    "mlp_fc_weight", "mlp_fc_bias",
-                    "mlp_proj_weight", "mlp_proj_bias"}
+        npu_keys = {
+            "ln1_weight",
+            "ln1_bias",
+            "ln2_weight",
+            "ln2_bias",
+            "mlp_fc_weight",
+            "mlp_fc_bias",
+            "mlp_proj_weight",
+            "mlp_proj_bias",
+        }
         self._cpu_layers = []
         for layer in self.layers:
             cpu_layer = {}
@@ -563,7 +647,9 @@ class GPT2Model:
         be = backend or self.backend
         try:
             return triton_linear(
-                x, weight.t(), bias=bias,
+                x,
+                weight.t(),
+                bias=bias,
                 backend=be,
                 transform_script=self.matmul_script if be == "npu" else None,
             )
@@ -581,14 +667,18 @@ class GPT2Model:
         be = backend or self.backend
         try:
             return triton_layernorm(
-                x, weight, bias, eps=LN_EPS,
+                x,
+                weight,
+                bias,
+                eps=LN_EPS,
                 backend=be,
                 transform_script=self.layernorm_script if be == "npu" else None,
             )
         except Exception as e:
             logger.warning(f"Triton layernorm failed ({e}), falling back to PyTorch")
             out = torch.nn.functional.layer_norm(
-                x.to(torch.float32), (x.shape[-1],),
+                x.to(torch.float32),
+                (x.shape[-1],),
                 weight=weight.to(torch.float32),
                 bias=bias.to(torch.float32),
                 eps=LN_EPS,
@@ -600,7 +690,8 @@ class GPT2Model:
         be = backend or self.backend
         try:
             return triton_gelu(
-                x, backend=be,
+                x,
+                backend=be,
                 transform_script=self.elem_script if be == "npu" else None,
             )
         except Exception as e:
@@ -613,7 +704,9 @@ class GPT2Model:
         be = backend or self.backend
         try:
             return triton_add(
-                a, b, backend=be,
+                a,
+                b,
+                backend=be,
                 transform_script=self.add_script if be == "npu" else None,
             )
         except Exception as e:
@@ -626,7 +719,8 @@ class GPT2Model:
         be = backend or self.backend
         try:
             return triton_softmax(
-                x, causal_mask=causal_mask,
+                x,
+                causal_mask=causal_mask,
                 backend=be,
                 transform_script=self.softmax_script if be == "npu" else None,
             )
@@ -675,8 +769,8 @@ class GPT2Model:
         # KV cache: write into pre-allocated buffer (no torch.cat)
         if kv_cache is not None:
             cache_k, cache_v, seq_pos = kv_cache
-            cache_k[:, :, seq_pos:seq_pos + S, :] = k_new
-            cache_v[:, :, seq_pos:seq_pos + S, :] = v_new
+            cache_k[:, :, seq_pos : seq_pos + S, :] = k_new
+            cache_v[:, :, seq_pos : seq_pos + S, :] = v_new
             total_len = seq_pos + S
             k_full = cache_k[:, :, :total_len, :]
             v_full = cache_v[:, :, :total_len, :]
@@ -691,11 +785,19 @@ class GPT2Model:
         scale = 1.0 / math.sqrt(self.head_dim)
         if self.backend in ("gpu", "hetero", "hetero-fast"):
             q_3d = q.reshape(B * self.n_head, S, self.head_dim).contiguous()
-            k_3d = k_full.reshape(B * self.n_head, total_len, self.head_dim).contiguous()
-            v_3d = v_full.reshape(B * self.n_head, total_len, self.head_dim).contiguous()
-            is_causal = S > 1  # Decode (S=1): every past position visible, no causal mask
+            k_3d = k_full.reshape(
+                B * self.n_head, total_len, self.head_dim
+            ).contiguous()
+            v_3d = v_full.reshape(
+                B * self.n_head, total_len, self.head_dim
+            ).contiguous()
+            is_causal = (
+                S > 1
+            )  # Decode (S=1): every past position visible, no causal mask
             attn_output = triton_fused_attention(
-                q_3d, k_3d, v_3d,
+                q_3d,
+                k_3d,
+                v_3d,
                 scale=scale,
                 causal=is_causal,
                 pos_offset=pos_offset,
@@ -718,8 +820,12 @@ class GPT2Model:
                 cols = torch.arange(total_len, device=x.device).unsqueeze(0)
                 causal_mask = (cols <= rows).unsqueeze(0).unsqueeze(0)
                 attn_flat = attn_scores.reshape(-1, total_len)
-                causal_flat = causal_mask.expand(B, self.n_head, S, total_len).reshape(-1, total_len)
-                attn_weights_flat = self._softmax(attn_flat, causal_mask=causal_flat, backend=softmax_be)
+                causal_flat = causal_mask.expand(B, self.n_head, S, total_len).reshape(
+                    -1, total_len
+                )
+                attn_weights_flat = self._softmax(
+                    attn_flat, causal_mask=causal_flat, backend=softmax_be
+                )
                 attn_weights = attn_weights_flat.reshape(B, self.n_head, S, total_len)
             attn_output = torch.matmul(attn_weights, v_full)
 
@@ -727,7 +833,12 @@ class GPT2Model:
         attn_output = attn_output.transpose(1, 2).reshape(B, S, self.n_embd)
 
         # Output projection: (B, S, 768) -> (B, S, 768)
-        proj = self._linear(attn_output, layer["attn_proj_weight"], layer["attn_proj_bias"], backend=proj_be)
+        proj = self._linear(
+            attn_output,
+            layer["attn_proj_weight"],
+            layer["attn_proj_bias"],
+            backend=proj_be,
+        )
 
         return proj, new_kv_cache
 
@@ -757,7 +868,9 @@ class GPT2Model:
 
         # Token + position embeddings — stay in bf16 to avoid per-layer casts
         # In hetero mode, embeddings are on CPU (wte/wpe stay on CPU)
-        positions = torch.arange(pos_offset, pos_offset + S, dtype=torch.long, device=input_ids.device)
+        positions = torch.arange(
+            pos_offset, pos_offset + S, dtype=torch.long, device=input_ids.device
+        )
         positions = positions.unsqueeze(0).expand(B, -1)
         x = self.wte[input_ids] + self.wpe[positions]  # bf16 + bf16 = bf16
 
@@ -774,23 +887,39 @@ class GPT2Model:
                     x = self._to_gpu(x)
 
                 with self.timer.track("ln1"):
-                    x_norm = self._layernorm(x, layer["ln1_weight"], layer["ln1_bias"], backend="gpu")
+                    x_norm = self._layernorm(
+                        x, layer["ln1_weight"], layer["ln1_bias"], backend="gpu"
+                    )
 
                 layer_cache = kv_caches[i] if kv_caches else None
                 with self.timer.track("attention"):
-                    attn_out, new_cache = self._attention(x_norm, layer, kv_cache=layer_cache, pos_offset=pos_offset)
+                    attn_out, new_cache = self._attention(
+                        x_norm, layer, kv_cache=layer_cache, pos_offset=pos_offset
+                    )
                 new_kv_caches.append(new_cache)
 
                 with self.timer.track("add1"):
                     x = self._add(x, attn_out, backend="gpu")
                 with self.timer.track("ln2"):
-                    x_norm = self._layernorm(x, layer["ln2_weight"], layer["ln2_bias"], backend="gpu")
+                    x_norm = self._layernorm(
+                        x, layer["ln2_weight"], layer["ln2_bias"], backend="gpu"
+                    )
                 with self.timer.track("mlp_fc"):
-                    h = self._linear(x_norm, layer["mlp_fc_weight"], layer["mlp_fc_bias"], backend="gpu")
+                    h = self._linear(
+                        x_norm,
+                        layer["mlp_fc_weight"],
+                        layer["mlp_fc_bias"],
+                        backend="gpu",
+                    )
                 with self.timer.track("gelu"):
                     h = self._gelu(h, backend="gpu")
                 with self.timer.track("mlp_proj"):
-                    mlp_out = self._linear(h, layer["mlp_proj_weight"], layer["mlp_proj_bias"], backend="gpu")
+                    mlp_out = self._linear(
+                        h,
+                        layer["mlp_proj_weight"],
+                        layer["mlp_proj_bias"],
+                        backend="gpu",
+                    )
                 with self.timer.track("add2"):
                     x = self._add(x, mlp_out, backend="gpu")
 
@@ -799,21 +928,26 @@ class GPT2Model:
                 # GPU for attention; NPU for LN/MLP/add.
                 # hetero-fast: weights are on GPU, use _cpu_layers for NPU ops
                 # hetero: LN/MLP weights are already on CPU in layer dict
-                npu_w = self._cpu_layers[i] if hasattr(self, '_cpu_layers') else layer
+                npu_w = self._cpu_layers[i] if hasattr(self, "_cpu_layers") else layer
                 ln1_be = self.op_backend["layernorm"]
                 # LayerNorm on tiny (<=4x768) CPU tensors: NPU dispatch overhead
                 # (~1.5-4ms) dwarfs the compute, so normalize on host.
                 with self.timer.track("ln1"):
                     x_norm = torch.nn.functional.layer_norm(
-                        x.to(torch.float32), (self.n_embd,),
+                        x.to(torch.float32),
+                        (self.n_embd,),
                         npu_w["ln1_weight"].to(torch.float32),
-                        npu_w["ln1_bias"].to(torch.float32), eps=LN_EPS)
+                        npu_w["ln1_bias"].to(torch.float32),
+                        eps=LN_EPS,
+                    )
                 with self.timer.track("to_gpu"):
                     x_norm = self._to_gpu(x_norm)
 
                 layer_cache = kv_caches[i] if kv_caches else None
                 with self.timer.track("attention"):
-                    attn_out, new_cache = self._attention(x_norm, layer, kv_cache=layer_cache, pos_offset=pos_offset)
+                    attn_out, new_cache = self._attention(
+                        x_norm, layer, kv_cache=layer_cache, pos_offset=pos_offset
+                    )
                 new_kv_caches.append(new_cache)
 
                 with self.timer.track("to_cpu"):
@@ -827,13 +961,16 @@ class GPT2Model:
                     x = x.to(torch.float32) + attn_out.to(torch.float32)
 
                 # NPU ops: use CPU-resident weights
-                npu_w = self._cpu_layers[i] if hasattr(self, '_cpu_layers') else layer
+                npu_w = self._cpu_layers[i] if hasattr(self, "_cpu_layers") else layer
                 ln2_be = self.op_backend["layernorm"]
                 with self.timer.track("ln2"):
                     x_norm = torch.nn.functional.layer_norm(
-                        x.to(torch.float32), (self.n_embd,),
+                        x.to(torch.float32),
+                        (self.n_embd,),
                         npu_w["ln2_weight"].to(torch.float32),
-                        npu_w["ln2_bias"].to(torch.float32), eps=LN_EPS)
+                        npu_w["ln2_bias"].to(torch.float32),
+                        eps=LN_EPS,
+                    )
 
                 mlp_fc_be = self.op_backend["mlp_fc"]
                 gelu_be = self.op_backend["gelu"]
@@ -844,7 +981,8 @@ class GPT2Model:
                 # path. mlp_proj bias is applied inside the fused helper.
                 _fused_ok = (
                     self._fused_mlp is not None
-                    and mlp_fc_be == "npu" and gelu_be == "npu"
+                    and mlp_fc_be == "npu"
+                    and gelu_be == "npu"
                     and mlp_proj_be == "npu"
                     and x_norm.reshape(-1, self.n_embd).shape[0] <= self._fused_mlp.BM
                 )
@@ -853,17 +991,31 @@ class GPT2Model:
                     # run() returns x + mlp(x_norm) directly.
                     with self.timer.track("mlp_fused"):
                         x = self._fused_mlp.run(
-                            i, x_norm, x,
-                            npu_w["mlp_fc_weight"], npu_w["mlp_fc_bias"],
-                            npu_w["mlp_proj_weight"], npu_w["mlp_proj_bias"],
+                            i,
+                            x_norm,
+                            x,
+                            npu_w["mlp_fc_weight"],
+                            npu_w["mlp_fc_bias"],
+                            npu_w["mlp_proj_weight"],
+                            npu_w["mlp_proj_bias"],
                         )
                 else:
                     with self.timer.track("mlp_fc"):
-                        h = self._linear(x_norm, npu_w["mlp_fc_weight"], npu_w["mlp_fc_bias"], backend=mlp_fc_be)
+                        h = self._linear(
+                            x_norm,
+                            npu_w["mlp_fc_weight"],
+                            npu_w["mlp_fc_bias"],
+                            backend=mlp_fc_be,
+                        )
                     with self.timer.track("gelu"):
                         h = self._gelu(h, backend=gelu_be)
                     with self.timer.track("mlp_proj"):
-                        mlp_out = self._linear(h, npu_w["mlp_proj_weight"], npu_w["mlp_proj_bias"], backend=mlp_proj_be)
+                        mlp_out = self._linear(
+                            h,
+                            npu_w["mlp_proj_weight"],
+                            npu_w["mlp_proj_bias"],
+                            backend=mlp_proj_be,
+                        )
                     with self.timer.track("add2"):
                         x = self._add(x, mlp_out, backend=add_be)
 
@@ -874,7 +1026,9 @@ class GPT2Model:
 
                 layer_cache = kv_caches[i] if kv_caches else None
                 with self.timer.track("attention"):
-                    attn_out, new_cache = self._attention(x_norm, layer, kv_cache=layer_cache, pos_offset=pos_offset)
+                    attn_out, new_cache = self._attention(
+                        x_norm, layer, kv_cache=layer_cache, pos_offset=pos_offset
+                    )
                 new_kv_caches.append(new_cache)
 
                 with self.timer.track("add1"):
@@ -896,17 +1050,25 @@ class GPT2Model:
                     # x + mlp(x_norm) directly.
                     with self.timer.track("mlp_fused"):
                         x = self._fused_mlp.run(
-                            i, x_norm, x,
-                            layer["mlp_fc_weight"], layer["mlp_fc_bias"],
-                            layer["mlp_proj_weight"], layer["mlp_proj_bias"],
+                            i,
+                            x_norm,
+                            x,
+                            layer["mlp_fc_weight"],
+                            layer["mlp_fc_bias"],
+                            layer["mlp_proj_weight"],
+                            layer["mlp_proj_bias"],
                         )
                 else:
                     with self.timer.track("mlp_fc"):
-                        h = self._linear(x_norm, layer["mlp_fc_weight"], layer["mlp_fc_bias"])
+                        h = self._linear(
+                            x_norm, layer["mlp_fc_weight"], layer["mlp_fc_bias"]
+                        )
                     with self.timer.track("gelu"):
                         h = self._gelu(h)
                     with self.timer.track("mlp_proj"):
-                        mlp_out = self._linear(h, layer["mlp_proj_weight"], layer["mlp_proj_bias"])
+                        mlp_out = self._linear(
+                            h, layer["mlp_proj_weight"], layer["mlp_proj_bias"]
+                        )
                     with self.timer.track("add2"):
                         x = self._add(x, mlp_out)
 
@@ -914,11 +1076,23 @@ class GPT2Model:
         if hetero and not decode_gpu:
             # Final LN on CPU: tiny tensor, NPU dispatch overhead dominates.
             with self.timer.track("ln_f"):
-                ln_f_w = self._cpu_ln_f_weight if hasattr(self, '_cpu_ln_f_weight') else self.ln_f_weight
-                ln_f_b = self._cpu_ln_f_bias if hasattr(self, '_cpu_ln_f_bias') else self.ln_f_bias
+                ln_f_w = (
+                    self._cpu_ln_f_weight
+                    if hasattr(self, "_cpu_ln_f_weight")
+                    else self.ln_f_weight
+                )
+                ln_f_b = (
+                    self._cpu_ln_f_bias
+                    if hasattr(self, "_cpu_ln_f_bias")
+                    else self.ln_f_bias
+                )
                 x = torch.nn.functional.layer_norm(
-                    x.to(torch.float32), (self.n_embd,),
-                    ln_f_w.to(torch.float32), ln_f_b.to(torch.float32), eps=LN_EPS)
+                    x.to(torch.float32),
+                    (self.n_embd,),
+                    ln_f_w.to(torch.float32),
+                    ln_f_b.to(torch.float32),
+                    eps=LN_EPS,
+                )
         elif hetero:
             with self.timer.track("ln_f"):
                 x = self._layernorm(x, self.ln_f_weight, self.ln_f_bias, backend="gpu")
@@ -931,7 +1105,9 @@ class GPT2Model:
         with self.timer.track("lm_head"):
             if self._wte_lm_head is not None:
                 # NPU/hetero: run on GPU (~0.5ms vs ~20ms on CPU)
-                logits = (x.to(device="cuda", dtype=torch.float32) @ self._wte_lm_head.t()).cpu()
+                logits = (
+                    x.to(device="cuda", dtype=torch.float32) @ self._wte_lm_head.t()
+                ).cpu()
             else:
                 # GPU: x and wte already on CUDA
                 logits = x.to(torch.float32) @ self.wte.to(torch.float32).t()
@@ -940,12 +1116,28 @@ class GPT2Model:
 
         return logits, new_kv_caches
 
-    def _allocate_kv_caches(self, batch_size, max_seq_len, device, dtype=torch.bfloat16):
+    def _allocate_kv_caches(
+        self, batch_size, max_seq_len, device, dtype=torch.bfloat16
+    ):
         """Pre-allocate KV cache buffers for all layers."""
         caches = []
         for _ in range(self.n_layer):
-            cache_k = torch.zeros(batch_size, self.n_head, max_seq_len, self.head_dim, dtype=dtype, device=device)
-            cache_v = torch.zeros(batch_size, self.n_head, max_seq_len, self.head_dim, dtype=dtype, device=device)
+            cache_k = torch.zeros(
+                batch_size,
+                self.n_head,
+                max_seq_len,
+                self.head_dim,
+                dtype=dtype,
+                device=device,
+            )
+            cache_v = torch.zeros(
+                batch_size,
+                self.n_head,
+                max_seq_len,
+                self.head_dim,
+                dtype=dtype,
+                device=device,
+            )
             caches.append((cache_k, cache_v, 0))
         return caches
 
@@ -995,7 +1187,9 @@ class GPT2Model:
 
             t0 = time.perf_counter()
             with torch.no_grad():
-                logits, kv_caches = self.forward(next_input, kv_caches=kv_caches, pos_offset=pos_offset)
+                logits, kv_caches = self.forward(
+                    next_input, kv_caches=kv_caches, pos_offset=pos_offset
+                )
             t1 = time.perf_counter()
             timing["decode_times_ms"].append((t1 - t0) * 1000)
 

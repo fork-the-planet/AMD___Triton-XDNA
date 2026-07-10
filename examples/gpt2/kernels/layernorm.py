@@ -96,7 +96,9 @@ def layernorm_kernel_npu(
     out = (a_block - mean) * inv_std
 
     tl.store(
-        Y + offs_row[:, None] * output_stride_row + offs_col[None, :] * output_stride_col,
+        Y
+        + offs_row[:, None] * output_stride_row
+        + offs_col[None, :] * output_stride_col,
         out,
     )
 
