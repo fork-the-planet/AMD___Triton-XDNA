@@ -157,9 +157,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Python matrix is narrower than Linux: Xilinx publishes mlir-air
-        # Windows wheels only for cp310/cp311/cp312 (no cp313/cp314).
-        python_version: ["3.10", "3.11", "3.12"]
+        # Matches the Linux matrix. Xilinx began publishing mlir-air/mlir-aie
+        # Windows wheels for cp313/cp314 in mid-May 2026, so the earlier
+        # cp310-cp312 cap is no longer needed. 3.13 is the version that also
+        # matches the prebuilt pyxrt.pyd shipped in the XRT Windows SDK.
+        python_version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
 
     env:
       # Pinned XRT Windows SDK release. Provides headers, xrt_coreutil.lib,
@@ -338,7 +340,7 @@ jobs:
             **Build Date:** ${{ steps.commit-info.outputs.datetime }}
 
             Linux wheels: Python 3.10–3.14 (manylinux_x86_64)
-            Windows wheels: Python 3.10–3.12 (win_amd64)
+            Windows wheels: Python 3.10–3.14 (win_amd64)
 
             ### Installation (Linux)
 

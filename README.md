@@ -131,7 +131,10 @@ compilation pipeline (Triton → MLIR → xclbin → XRT dispatch) runs natively
 
 - **Windows 10/11** (x64)
 - **Visual Studio 2022** with "Desktop development with C++" workload
-- **Python 3.10, 3.11, or 3.12** (Xilinx Windows wheels do not yet support 3.13+)
+- **Python 3.10–3.14** (3.13 recommended). Prebuilt Windows wheels are published
+  for all of these versions; 3.13 is recommended because it matches the prebuilt
+  `pyxrt.pyd` in the current XRT Windows SDK (see below), so the runtime binding
+  works without building it from source.
 - **CMake 3.20+** and **Ninja** (via pip or standalone)
 - **AMD NPU driver** (installs `xrt_coreutil.dll` runtime)
 
@@ -157,6 +160,21 @@ folder is `xrt_sdk/`) to `C:\Program Files\AMD\xrt`:
 #   C:\Program Files\AMD\xrt\include\xrt\xrt_bo.h
 #   C:\Program Files\AMD\xrt\lib\xrt_coreutil.lib
 ```
+
+The same zip also contains the runtime Python binding `pyxrt.pyd` at
+`xrt_sdk/xrt/python/pyxrt.pyd`, which is required at execution time (the NPU
+launcher does `import pyxrt`). Copy it onto your interpreter's import path:
+
+```powershell
+# The current pyxrt.pyd targets Python 3.13. On a 3.13 venv, copy it into
+# site-packages (or any directory on PYTHONPATH):
+Copy-Item "path\to\xrt_sdk\xrt\python\pyxrt.pyd" ".\venv\Lib\site-packages\"
+```
+
+`pyxrt.pyd` loads `xrt_coreutil.dll` at import time, so ensure the AMD NPU driver
+is installed (it provides that DLL) and on `PATH`. On a Python version other than
+the one the `.pyd` targets, importing it raises `ImportError: DLL load failed`;
+in that case, build `pyxrt` from source against your interpreter.
 
 Run the automated environment setup (must be dot-sourced so PATH/env vars
 persist in the current shell):
@@ -223,7 +241,10 @@ python vec-add.py
 
 ### Windows Known Limitations
 
-- Python 3.10, 3.11, and 3.12 only — Xilinx does not publish `mlir-air` /
-  `mlir-aie` Windows wheels for 3.13+ yet
+- Python 3.10–3.14 supported; 3.13 recommended so the prebuilt `pyxrt.pyd` in the
+  XRT Windows SDK can be used as-is. On other versions, build `pyxrt` from source
+  to match your interpreter
+- `pyxrt.pyd` (from the XRT Windows SDK zip) must be on `PYTHONPATH` /
+  site-packages, and the AMD NPU driver's `xrt_coreutil.dll` must be on `PATH`
 - xclbinutil and aiebu-asm must be on PATH (from XRT Windows SDK)
 - NPU driver must be installed
